@@ -1,0 +1,55 @@
+services:
+  - type: web
+    name: disparo-zap-backend
+    runtime: node
+    plan: starter
+    region: oregon
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: whatsapp-sessions
+      mountPath: /data/sessions
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: 3333
+      - key: WHATSAPP_SESSION_PATH
+        value: /data/sessions
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: faturas
+      - key: MIN_DELAY_MS
+        value: 5000
+      - key: MAX_DELAY_MS
+        value: 15000
+      - key: DAILY_LIMIT
+        value: 100
+      - key: BATCH_SIZE
+        value: 20
+      - key: BATCH_PAUSE_MS
+        value: 600000
+      - key: WEBHOOK_URL
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+
+  - type: web
+    name: disparo-zap-frontend
+    runtime: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false

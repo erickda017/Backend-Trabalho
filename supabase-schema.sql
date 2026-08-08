@@ -125,6 +125,14 @@ create table if not exists mensagens (
   created_at timestamptz default now()
 );
 
+-- Necessário pro .upsert(..., { onConflict: 'message_id' }) em chatIngest.js funcionar --
+-- sem um índice único de verdade nessa coluna, o Postgres recusa o ON CONFLICT com
+-- "there is no unique or exclusion constraint matching the ON CONFLICT specification".
+-- Parcial (where message_id is not null) porque message_id pode ficar nulo em alguns
+-- fluxos e um índice único comum já trata múltiplos NULLs como distintos, mas ser
+-- explícito aqui deixa a intenção clara e evita índice inchado à toa.
+create unique index if not exists mensagens_message_id_key on mensagens (message_id) where message_id is not null;
+
 create index if not exists mensagens_conversa_id_idx on mensagens (conversa_id, created_at);
 create index if not exists conversas_ultima_mensagem_em_idx on conversas (ultima_mensagem_em desc);
 

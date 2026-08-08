@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase.js';
 import { enviarMensagemComPdf, enviarMensagemTexto, validarNumero } from './whatsapp.js';
 import { dispararWebhook } from './webhook.js';
+import { registrarMensagemSaida } from './chatIngest.js';
 
 const MIN_DELAY = Number(process.env.MIN_DELAY_MS || 5000);
 const MAX_DELAY = Number(process.env.MAX_DELAY_MS || 15000);
@@ -108,6 +109,24 @@ async function enviarItem(item, envio) {
         enviado_em: new Date().toISOString(),
       })
       .eq('id', item.id);
+
+    // Sem isso, disparo em massa nunca aparecia na aba Chat -- a conversa só nascia
+    // quando o cliente respondia. Grava aqui o mesmo jeito que a resposta manual do
+    // Chat grava (registrarMensagemSaida), então o histórico fica completo dos dois lados.
+    try {
+      await registrarMensagemSaida({
+        telefone: cliente.telefone,
+        texto: mensagem,
+        tipo: cliente.pdf_url ? 'documento' : 'texto',
+        anexoUrl: cliente.pdf_url || null,
+        anexoNome: cliente.pdf_url ? `fatura-${cliente.nome}.pdf` : null,
+        messageId,
+      });
+    } catch (chatErr) {
+      // Erro ao gravar no chat não pode derrubar o disparo em si -- a mensagem já
+      // foi enviada de verdade pro WhatsApp, isso é só o espelho no histórico.
+      console.error(`[dispatch] erro ao registrar no chat para ${cliente.nome}:`, chatErr.message);
+    }
 
     await dispararWebhook('mensagem_enviada', { cliente, envio_id: envio.id, message_id: messageId });
   } catch (err) {

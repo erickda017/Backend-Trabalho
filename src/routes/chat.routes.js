@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { supabase, CHAT_BUCKET } from '../lib/supabase.js';
-import { enviarMensagemTexto, enviarMensagemComAnexo } from '../services/whatsapp.js';
+import { enviarMensagemTexto, enviarMensagemComAnexo, validarNumero } from '../services/whatsapp.js';
 import { registrarMensagemSaida } from '../services/chatIngest.js';
 
 const router = Router();
@@ -95,16 +95,25 @@ router.post('/conversas/:id/mensagens', upload.single('anexo'), async (req, res)
       anexoNome = req.file.originalname;
     }
 
+    // Confirma o JID real antes de mandar -- mesma regra do disparo em massa
+    // (dispatchQueue.js). Sem isso o Baileys aceita o envio sem erro mas manda
+    // pra um número "adivinhado" que pode não bater com o dispositivo real.
+    const { existe, jid } = await validarNumero(conversa.telefone);
+    if (!existe) {
+      return res.status(400).json({ error: 'Este número não foi encontrado no WhatsApp' });
+    }
+
     const { messageId } = anexoUrl
       ? await enviarMensagemComAnexo({
           numero: conversa.telefone,
+          jid,
           mensagem,
           anexoUrl,
           anexoNome,
           anexoTipo: tipo,
           anexoMimetype: req.file.mimetype,
         })
-      : await enviarMensagemTexto({ numero: conversa.telefone, mensagem });
+      : await enviarMensagemTexto({ numero: conversa.telefone, jid, mensagem });
 
     const { mensagem: linhaSalva } = await registrarMensagemSaida({
       telefone: conversa.telefone,

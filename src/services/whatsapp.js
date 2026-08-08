@@ -30,6 +30,11 @@ export async function startWhatsApp() {
     auth: state,
     logger,
     printQRInTerminal: false,
+    // Default (60s) é curto pra latência Render <-> WhatsApp -- foi o que estourou
+    // o sendPassiveIq (query interna do próprio Baileys, disparada sozinha após
+    // conectar, sem try/catch nosso pra pegar). Sobe a margem em vez de tentar
+    // "consertar" uma promise que não é nossa.
+    defaultQueryTimeoutMs: 120_000,
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -186,9 +191,10 @@ export async function enviarMensagemTexto({ numero, jid, mensagem }) {
 // Envio genérico usado pelo Chat (resposta ao cliente) -- diferente do
 // enviarMensagemComPdf, aqui o anexo pode ser imagem, áudio ou documento qualquer,
 // e o texto é opcional (pode mandar só o anexo, ou só texto).
-export async function enviarMensagemComAnexo({ numero, mensagem, anexoUrl, anexoNome, anexoTipo, anexoMimetype }) {
+// `jid` deve vir de validarNumero() -- mesma regra de enviarMensagemComPdf/Texto acima.
+export async function enviarMensagemComAnexo({ numero, jid, mensagem, anexoUrl, anexoNome, anexoTipo, anexoMimetype }) {
   const socket = getSocket();
-  const jid = formatJid(numero);
+  const destino = jid || formatJid(numero);
 
   let payload;
   if (anexoUrl && anexoTipo === 'imagem') {
@@ -206,6 +212,6 @@ export async function enviarMensagemComAnexo({ numero, mensagem, anexoUrl, anexo
     payload = { text: mensagem || '' };
   }
 
-  const enviada = await socket.sendMessage(jid, payload);
+  const enviada = await socket.sendMessage(destino, payload);
   return { messageId: enviada?.key?.id || null };
 }

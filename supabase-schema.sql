@@ -128,10 +128,12 @@ create table if not exists mensagens (
 -- Necessário pro .upsert(..., { onConflict: 'message_id' }) em chatIngest.js funcionar --
 -- sem um índice único de verdade nessa coluna, o Postgres recusa o ON CONFLICT com
 -- "there is no unique or exclusion constraint matching the ON CONFLICT specification".
--- Parcial (where message_id is not null) porque message_id pode ficar nulo em alguns
--- fluxos e um índice único comum já trata múltiplos NULLs como distintos, mas ser
--- explícito aqui deixa a intenção clara e evita índice inchado à toa.
-create unique index if not exists mensagens_message_id_key on mensagens (message_id) where message_id is not null;
+-- NÃO usar índice parcial (where message_id is not null) aqui: Postgres não aceita
+-- índice único parcial como alvo de um ON CONFLICT (message_id) simples -- precisaria
+-- repetir a mesma cláusula WHERE no próprio ON CONFLICT, e o .upsert() do
+-- supabase-js não manda isso. Índice único comum resolve igual: NULL já é tratado
+-- como valor distinto entre si, então várias linhas com message_id nulo continuam OK.
+create unique index if not exists mensagens_message_id_key on mensagens (message_id);
 
 create index if not exists mensagens_conversa_id_idx on mensagens (conversa_id, created_at);
 create index if not exists conversas_ultima_mensagem_em_idx on conversas (ultima_mensagem_em desc);

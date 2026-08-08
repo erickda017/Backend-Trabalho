@@ -156,11 +156,17 @@ export async function validarNumero(numero) {
   return { existe: Boolean(resultado?.exists), jid: resultado?.jid || formatJid(numero) };
 }
 
-export async function enviarMensagemComPdf({ numero, mensagem, pdfUrl, pdfNome }) {
+// IMPORTANTE: `jid` deve vir de validarNumero() sempre que possível -- é o JID
+// REAL confirmado pelo WhatsApp via onWhatsApp(), que pode divergir do que
+// formatJid(numero) monta na mão (ex: número antigo registrado sem o 9º dígito).
+// Mandar pro JID "adivinhado" em vez do JID validado é o motivo clássico de a
+// mensagem sair como "enviada" no Baileys (sem erro) e nunca chegar de verdade
+// no aparelho: o socket aceita o envio, mas o destino não existe como tal.
+export async function enviarMensagemComPdf({ numero, jid, mensagem, pdfUrl, pdfNome }) {
   const socket = getSocket();
-  const jid = formatJid(numero);
+  const destino = jid || formatJid(numero);
 
-  const enviada = await socket.sendMessage(jid, {
+  const enviada = await socket.sendMessage(destino, {
     document: { url: pdfUrl },
     mimetype: 'application/pdf',
     fileName: pdfNome || 'fatura.pdf',
@@ -170,10 +176,10 @@ export async function enviarMensagemComPdf({ numero, mensagem, pdfUrl, pdfNome }
   return { messageId: enviada?.key?.id || null };
 }
 
-export async function enviarMensagemTexto({ numero, mensagem }) {
+export async function enviarMensagemTexto({ numero, jid, mensagem }) {
   const socket = getSocket();
-  const jid = formatJid(numero);
-  const enviada = await socket.sendMessage(jid, { text: mensagem });
+  const destino = jid || formatJid(numero);
+  const enviada = await socket.sendMessage(destino, { text: mensagem });
   return { messageId: enviada?.key?.id || null };
 }
 

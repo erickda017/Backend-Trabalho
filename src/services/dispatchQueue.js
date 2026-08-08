@@ -75,7 +75,7 @@ async function enviarItem(item, envio) {
   // Também dentro do try/catch: se a validação falhar (ex: conexão caiu no meio do
   // disparo), o item vira 'erro' (retry-ável) em vez de derrubar o lote inteiro.
   try {
-    const { existe } = await validarNumero(cliente.telefone);
+    const { existe, jid } = await validarNumero(cliente.telefone);
     if (!existe) {
       await supabase
         .from('envio_itens')
@@ -86,14 +86,17 @@ async function enviarItem(item, envio) {
       return;
     }
 
+    // Usa o `jid` já validado acima (o real, confirmado pelo WhatsApp) em vez de
+    // deixar enviarMensagem* remontar o número na mão -- ver comentário em whatsapp.js.
     const { messageId } = cliente.pdf_url
       ? await enviarMensagemComPdf({
           numero: cliente.telefone,
+          jid,
           mensagem,
           pdfUrl: cliente.pdf_url,
           pdfNome: `fatura-${cliente.nome}.pdf`,
         })
-      : await enviarMensagemTexto({ numero: cliente.telefone, mensagem });
+      : await enviarMensagemTexto({ numero: cliente.telefone, jid, mensagem });
 
     await supabase
       .from('envio_itens')

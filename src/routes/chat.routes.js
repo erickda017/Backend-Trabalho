@@ -3,7 +3,6 @@ import multer from 'multer';
 import { supabase, CHAT_BUCKET } from '../lib/supabase.js';
 import { enviarMensagemTexto, enviarMensagemComAnexo, validarNumero } from '../services/whatsapp.js';
 import { registrarMensagemSaida } from '../services/chatIngest.js';
-
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -125,6 +124,71 @@ router.post('/conversas/:id/mensagens', upload.single('anexo'), async (req, res)
     });
 
     res.status(201).json(linhaSalva);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manda a fatura (PDF) do cliente vinculado a essa conversa, e junto o código Pix
+// já extraído do QR do PDF (se tiver) como mensagem de texto separada -- assim o
+// cliente recebe o boleto E o "copia e cola" pronto, sem precisar escanear nada.
+router.post('/conversas/:id/enviar-fatura', async (req, res) => {
+  const { id } = req.params;
+
+  const { data: conversa, error: conversaError } = await supabase
+    .from('conversas')
+    .select('telefone, cliente_id, clientes(nome, pdf_url, pix_code)')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (conversaError) return res.status(500).json({ error: conversaError.message });
+  if (!conversa) return res.status(404).json({ error: 'conversa não encontrada' });
+  if (!conversa.cliente_id || !conversa.clientes?.pdf_url) {
+    return res.status(400).json({ error: 'Este contato não tem fatura (PDF) cadastrada' });
+  }
+
+  try {
+    const { existe, jid } = await validarNumero(conversa.telefone);
+    if (!existe) return res.status(400).json({ error: 'Este número não foi encontrado no WhatsApp' });
+
+    const cliente = conversa.clientes;
+    const nomeArquivo = `fatura-${cliente.nome || 'cliente'}.pdf`;
+
+    const { messageId } = await enviarMensagemComAnexo({
+      numero: conversa.telefone,
+      jid,
+      anexoUrl: cliente.pdf_url,
+      anexoNome: nomeArquivo,
+      anexoTipo: 'documento',
+      anexoMimetype: 'application/pdf',
+    });
+
+    const { mensagem: linhaFatura } = await registrarMensagemSaida({
+      telefone: conversa.telefone,
+      texto: null,
+      tipo: 'documento',
+      anexoUrl: cliente.pdf_url,
+      anexoNome: nomeArquivo,
+      messageId,
+    });
+
+    let linhaPix = null;
+    if (cliente.pix_code) {
+      const { messageId: pixMessageId } = await enviarMensagemTexto({
+        numero: conversa.telefone,
+        jid,
+        mensagem: `Código Pix (copia e cola):\n${cliente.pix_code}`,
+      });
+      const { mensagem } = await registrarMensagemSaida({
+        telefone: conversa.telefone,
+        texto: `Código Pix (copia e cola):\n${cliente.pix_code}`,
+        tipo: 'texto',
+        messageId: pixMessageId,
+      });
+      linhaPix = mensagem;
+    }
+
+    res.status(201).json({ fatura: linhaFatura, pix: linhaPix });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

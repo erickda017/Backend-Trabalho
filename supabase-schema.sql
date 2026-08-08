@@ -8,6 +8,7 @@ create table if not exists clientes (
   vencimento text,
   pdf_url text,
   pdf_path text,
+  pix_code text, -- extraído automaticamente do QR code do PDF (ver src/lib/pixFromPdf.js)
   created_at timestamptz default now()
 );
 
@@ -93,6 +94,40 @@ create table if not exists whatsapp_sessions (
   updated_at timestamptz default now(),
   primary key (session_id, key)
 );
+
+-- ==========================================================================
+-- Tags por cliente
+-- ==========================================================================
+create table if not exists tags (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null,
+  cor text not null default '#6366f1',
+  created_at timestamptz default now()
+);
+create unique index if not exists tags_nome_key on tags (lower(nome));
+
+create table if not exists cliente_tags (
+  cliente_id uuid not null references clientes(id) on delete cascade,
+  tag_id uuid not null references tags(id) on delete cascade,
+  created_at timestamptz default now(),
+  primary key (cliente_id, tag_id)
+);
+create index if not exists cliente_tags_tag_id_idx on cliente_tags (tag_id);
+
+-- ==========================================================================
+-- Mensagens rápidas (atalho "/algo" no Chat)
+-- ==========================================================================
+create table if not exists respostas_rapidas (
+  id uuid primary key default gen_random_uuid(),
+  atalho text not null,
+  texto text not null,
+  created_at timestamptz default now()
+);
+create unique index if not exists respostas_rapidas_atalho_key on respostas_rapidas (lower(atalho));
+
+alter table tags enable row level security;
+alter table cliente_tags enable row level security;
+alter table respostas_rapidas enable row level security;
 
 -- Só o backend (service_role) acessa essa tabela, então RLS fica travado por padrão.
 alter table whatsapp_sessions enable row level security;

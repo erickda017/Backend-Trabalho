@@ -2,6 +2,7 @@ import XLSX from 'xlsx';
 import AdmZip from 'adm-zip';
 import { supabase, BUCKET } from '../lib/supabase.js';
 import { normalizarTelefone } from '../lib/telefone.js';
+import { extrairPixDoPdf } from '../lib/pixFromPdf.js';
 
 // Normaliza texto pra comparar nomes de arquivo com tolerância a maiúsculas/acentos/espaços
 function normalizar(str) {
@@ -144,9 +145,13 @@ export async function processarImportacao({ planilhaBuffer, zipBuffer, templateM
 
     const { data: publicUrlData } = supabase.storage.from(BUCKET).getPublicUrl(caminho);
 
+    // Mesma extração de Pix do upload manual (clientes.routes.js) -- não falha a
+    // importação se não achar QR, só deixa pix_code null pra esse cliente.
+    const pixCode = await extrairPixDoPdf(pdfEncontrado.conteudo);
+
     const { error: updateError } = await supabase
       .from('clientes')
-      .update({ pdf_url: publicUrlData.publicUrl, pdf_path: caminho })
+      .update({ pdf_url: publicUrlData.publicUrl, pdf_path: caminho, pix_code: pixCode })
       .eq('id', cliente.id);
 
     if (updateError) {

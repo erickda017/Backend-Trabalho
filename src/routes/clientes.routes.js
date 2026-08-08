@@ -2,6 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { supabase, BUCKET } from '../lib/supabase.js';
 import { normalizarTelefone } from '../lib/telefone.js';
+import { extrairPixDoPdf } from '../lib/pixFromPdf.js';
 
 const router = Router();
 const upload = multer({
@@ -15,15 +16,21 @@ const upload = multer({
   },
 });
 
-// Lista clientes
+// Lista clientes (com tags atribuídas)
 router.get('/', async (req, res) => {
   const { data, error } = await supabase
     .from('clientes')
-    .select('*')
+    .select('*, cliente_tags(tags(id, nome, cor))')
     .order('nome');
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  // Achata cliente_tags(tags(...)) pra um array simples `tags: [{id,nome,cor}]`
+  // -- fica mais fácil pro front não precisar saber da tabela de junção.
+  const comTagsAchatadas = (data || []).map(({ cliente_tags, ...c }) => ({
+    ...c,
+    tags: (cliente_tags || []).map((ct) => ct.tags).filter(Boolean),
+  }));
+  res.json(comTagsAchatadas);
 });
 
 // Cria cliente (sem PDF ainda)
@@ -71,9 +78,14 @@ router.post('/:id/pdf', upload.single('pdf'), async (req, res) => {
 
   const { data: publicUrlData } = supabase.storage.from(BUCKET).getPublicUrl(caminho);
 
+  // Tenta achar um QR code Pix na fatura e já deixa salvo/atribuído ao cliente --
+  // se não achar (fatura sem Pix, ou QR ilegível), pix_code fica null sem quebrar
+  // o upload em si.
+  const pixCode = await extrairPixDoPdf(req.file.buffer);
+
   const { data, error } = await supabase
     .from('clientes')
-    .update({ pdf_url: publicUrlData.publicUrl, pdf_path: caminho })
+    .update({ pdf_url: publicUrlData.publicUrl, pdf_path: caminho, pix_code: pixCode })
     .eq('id', id)
     .select()
     .single();

@@ -12,3 +12,7 @@ export const supabase = createClient(
 );
 
 export const BUCKET = process.env.SUPABASE_BUCKET || 'faturas';
+
+// Bucket separado pra mídia trocada no Chat (fotos/áudios/documentos recebidos ou
+// enviados por lá) -- fica isolado do bucket de faturas (BUCKET) de propósito.
+export const CHAT_BUCKET = process.env.SUPABASE_CHAT_BUCKET || 'chat-midia';

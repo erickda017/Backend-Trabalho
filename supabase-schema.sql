@@ -81,3 +81,93 @@ create index if not exists envios_pausado_retomar_em_idx on envios (retomar_em) 
 alter table clientes enable row level security;
 alter table envios enable row level security;
 alter table envio_itens enable row level security;
+
+-- Sessão do WhatsApp (Baileys), no lugar do antigo diretório em disco
+-- (WHATSAPP_SESSION_PATH). Cada linha guarda uma "chave" da sessão -- creds e
+-- as chaves de criptografia (session, sender-key, app-state-sync-key, etc) --
+-- serializadas com o BufferJSON do Baileys. Veja src/lib/supabaseAuthState.js.
+create table if not exists whatsapp_sessions (
+  session_id text not null,
+  key text not null,
+  data jsonb not null,
+  updated_at timestamptz default now(),
+  primary key (session_id, key)
+);
+
+-- Só o backend (service_role) acessa essa tabela, então RLS fica travado por padrão.
+alter table whatsapp_sessions enable row level security;
+
+-- ==========================================================================
+-- Chat: histórico de conversas do WhatsApp (recebidas + enviadas pelo painel)
+-- ==========================================================================
+
+create table if not exists conversas (
+  id uuid primary key default gen_random_uuid(),
+  telefone text not null unique, -- normalizado (dígitos + código do país)
+  cliente_id uuid references clientes(id) on delete set null, -- linkado por telefone quando existe
+  nome_contato text, -- nome do WhatsApp (pushName) ou do cliente, o que tiver
+  nao_lidas integer not null default 0,
+  ultima_mensagem text,
+  ultima_mensagem_em timestamptz,
+  created_at timestamptz default now()
+);
+
+create table if not exists mensagens (
+  id uuid primary key default gen_random_uuid(),
+  conversa_id uuid not null references conversas(id) on delete cascade,
+  direcao text not null, -- entrada (cliente -> nós) | saida (nós -> cliente)
+  tipo text not null default 'texto', -- texto | imagem | audio | documento
+  texto text,
+  anexo_url text,
+  anexo_nome text,
+  message_id text, -- id da mensagem no WhatsApp (Baileys) -- casa com o webhook de status de entrega
+  status_entrega text, -- enviado | entregue | lido
+  created_at timestamptz default now()
+);
+
+create index if not exists mensagens_conversa_id_idx on mensagens (conversa_id, created_at);
+create index if not exists conversas_ultima_mensagem_em_idx on conversas (ultima_mensagem_em desc);
+
+-- Evita duplicar a mesma mensagem do WhatsApp: a msg enviada pelo painel é gravada na
+-- hora (com o message_id que o Baileys devolveu) e, quando o evento messages.upsert
+-- ecoa essa mesma mensagem de volta (fromMe: true), o upsert por message_id ignora.
+create unique index if not exists mensagens_message_id_key on mensagens (message_id) where message_id is not null;
+
+-- Bucket de storage para mídia do chat (fotos/áudios/documentos)
+insert into storage.buckets (id, name, public)
+values ('chat-midia', 'chat-midia', true)
+on conflict (id) do nothing;
+
+-- Só o backend (service_role) escreve. Front lê/assina via Realtime autenticado.
+alter table conversas enable row level security;
+alter table mensagens enable row level security;
+
+-- create policy não tem "if not exists" no Postgres, por isso o drop antes
+-- (padrão idempotente, igual o resto deste arquivo)
+drop policy if exists "usuarios autenticados leem conversas" on conversas;
+create policy "usuarios autenticados leem conversas"
+  on conversas for select
+  to authenticated
+  using (true);
+
+drop policy if exists "usuarios autenticados leem mensagens" on mensagens;
+create policy "usuarios autenticados leem mensagens"
+  on mensagens for select
+  to authenticated
+  using (true);
+
+-- Habilita Realtime (INSERT/UPDATE) nessas duas tabelas -- é isso que o front escuta
+-- via supabase.channel(...).on('postgres_changes', ...) pra atualizar sem F5.
+-- (envolvido em DO/exception pra poder rodar de novo com segurança, já que
+-- "alter publication ... add table" dá erro se a tabela já foi adicionada)
+do $$
+begin
+  alter publication supabase_realtime add table conversas;
+exception when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table mensagens;
+exception when duplicate_object then null;
+end $$;

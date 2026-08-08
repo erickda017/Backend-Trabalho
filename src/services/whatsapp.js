@@ -1,21 +1,21 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, downloadMediaMessage } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import QRCode from 'qrcode';
-import path from 'path';
-import fs from 'fs';
-import { supabase } from '../lib/supabase.js';
+import { supabase, BUCKET } from '../lib/supabase.js';
+import { useSupabaseAuthState } from '../lib/supabaseAuthState.js';
 import { dispararWebhook } from './webhook.js';
 import { normalizarTelefone, formatJid } from '../lib/telefone.js';
+import { registrarMensagensRecebidas, registrarHistoricoInicial } from './chatIngest.js';
 
-const AUTH_DIR = process.env.WHATSAPP_SESSION_PATH
-  ? path.resolve(process.env.WHATSAPP_SESSION_PATH, 'default')
-  : path.resolve('sessions', 'default');
-fs.mkdirSync(AUTH_DIR, { recursive: true });
+// Identificador da sessão dentro da tabela whatsapp_sessions (permite, no futuro,
+// rodar mais de um número/instância trocando essa env var).
+const SESSION_ID = process.env.WHATSAPP_SESSION_ID || 'default';
 
 let sock = null;
 let lastQr = null;
 let connectionStatus = 'disconnected'; // disconnected | connecting | qr | connected
+let clearAuthState = null; // função pra apagar a sessão salva no Supabase (setada no startWhatsApp)
 
 const logger = pino({ level: 'silent' });
 
@@ -23,7 +23,8 @@ const logger = pino({ level: 'silent' });
 const STATUS_MAP = { 2: 'entregue', 3: 'lido', 4: 'lido' };
 
 export async function startWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { state, saveCreds, clearState } = await useSupabaseAuthState(SESSION_ID);
+  clearAuthState = clearState;
 
   sock = makeWASocket({
     auth: state,
@@ -90,6 +91,29 @@ export async function startWhatsApp() {
     }
   });
 
+  // Mensagens novas (recebidas do cliente OU enviadas por outro app/celular ligado à
+  // mesma conta). Grava no chat -- é o que faz a aba Chat ter dado de verdade.
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return; // 'notify' = mensagem nova chegando agora (ignora replays de sincronização, tratados abaixo)
+    try {
+      await registrarMensagensRecebidas(sock, messages);
+    } catch (err) {
+      console.error('[whatsapp] erro ao registrar mensagens recebidas:', err.message);
+    }
+  });
+
+  // Só acontece uma vez, logo após escanear um QR novo: o WhatsApp manda um lote
+  // (parcial, sem garantia de completude) do histórico recente de conversas.
+  // Tentamos aproveitar esse lote pra popular o chat com mensagens anteriores à
+  // conexão -- bônus, não é uma fonte confiável de histórico completo.
+  sock.ev.on('messaging-history.set', async ({ messages }) => {
+    try {
+      await registrarHistoricoInicial(sock, messages);
+    } catch (err) {
+      console.error('[whatsapp] erro ao registrar histórico inicial:', err.message);
+    }
+  });
+
   return sock;
 }
 
@@ -112,8 +136,9 @@ export async function logoutWhatsApp() {
     sock = null;
     connectionStatus = 'disconnected';
   }
-  fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  // Apaga a sessão salva no Supabase (linhas da whatsapp_sessions), no lugar do
+  // antigo fs.rmSync no diretório em disco.
+  if (clearAuthState) await clearAuthState();
 
   // Depois de um logout explícito, o Baileys NÃO reconecta sozinho (é o comportamento
   // esperado dele: statusCode 'loggedOut' desativa o auto-reconnect em connection.update).
@@ -149,5 +174,32 @@ export async function enviarMensagemTexto({ numero, mensagem }) {
   const socket = getSocket();
   const jid = formatJid(numero);
   const enviada = await socket.sendMessage(jid, { text: mensagem });
+  return { messageId: enviada?.key?.id || null };
+}
+
+// Envio genérico usado pelo Chat (resposta ao cliente) -- diferente do
+// enviarMensagemComPdf, aqui o anexo pode ser imagem, áudio ou documento qualquer,
+// e o texto é opcional (pode mandar só o anexo, ou só texto).
+export async function enviarMensagemComAnexo({ numero, mensagem, anexoUrl, anexoNome, anexoTipo, anexoMimetype }) {
+  const socket = getSocket();
+  const jid = formatJid(numero);
+
+  let payload;
+  if (anexoUrl && anexoTipo === 'imagem') {
+    payload = { image: { url: anexoUrl }, caption: mensagem || undefined };
+  } else if (anexoUrl && anexoTipo === 'audio') {
+    payload = { audio: { url: anexoUrl }, mimetype: anexoMimetype || 'audio/mpeg', ptt: false };
+  } else if (anexoUrl) {
+    payload = {
+      document: { url: anexoUrl },
+      mimetype: anexoMimetype || 'application/octet-stream',
+      fileName: anexoNome || 'arquivo',
+      caption: mensagem || undefined,
+    };
+  } else {
+    payload = { text: mensagem || '' };
+  }
+
+  const enviada = await socket.sendMessage(jid, payload);
   return { messageId: enviada?.key?.id || null };
 }

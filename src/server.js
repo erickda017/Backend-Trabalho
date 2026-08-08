@@ -10,6 +10,7 @@ import whatsappRoutes from './routes/whatsapp.routes.js';
 import clientesRoutes from './routes/clientes.routes.js';
 import enviosRoutes from './routes/envios.routes.js';
 import importacaoRoutes from './routes/importacao.routes.js';
+import chatRoutes from './routes/chat.routes.js';
 
 dotenv.config();
 
@@ -29,6 +30,7 @@ app.use('/api/whatsapp', requireAuth, whatsappRoutes);
 app.use('/api/clientes', requireAuth, clientesRoutes);
 app.use('/api/envios', requireAuth, enviosRoutes);
 app.use('/api/importacao', requireAuth, importacaoRoutes);
+app.use('/api/chat', requireAuth, chatRoutes);
 
 // Handler de erro global -- sem isso, erros como multer (arquivo grande demais, tipo
 // errado) ou qualquer exceção síncrona em uma rota caem no handler padrão do Express,

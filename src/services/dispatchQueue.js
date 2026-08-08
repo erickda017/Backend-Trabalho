@@ -38,7 +38,7 @@ function delayAleatorio() {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function montarMensagem(template, cliente) {
+export function montarMensagem(template, cliente) {
   const valorNumerico = cliente.valor != null ? Number(String(cliente.valor).replace(',', '.')) : null;
   return template
     .replaceAll('{{nome}}', cliente.nome || '')

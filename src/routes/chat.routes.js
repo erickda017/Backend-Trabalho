@@ -20,7 +20,7 @@ function tipoPorMimetype(mimetype) {
 router.get('/conversas', async (req, res) => {
   const { data, error } = await supabase
     .from('conversas')
-    .select('*, clientes(nome)')
+    .select('*, clientes(nome, pdf_url, pix_code)')
     .order('ultima_mensagem_em', { ascending: false, nullsFirst: false });
 
   if (error) return res.status(500).json({ error: error.message });
@@ -40,6 +40,16 @@ router.get('/conversas/:id/mensagens', async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
+});
+
+// Apaga a conversa e o histórico de mensagens dela (ex: contatos de teste, ou
+// conversas fantasma criadas por um "@lid" não resolvido -- ver fix em chatIngest.js).
+// mensagens some junto por causa do "on delete cascade" no schema.
+router.delete('/conversas/:id', async (req, res) => {
+  const { id } = req.params;
+  const { error } = await supabase.from('conversas').delete().eq('id', id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
 });
 
 // Marca conversa como lida (zera o contador de não lidas)
@@ -134,6 +144,7 @@ router.post('/conversas/:id/mensagens', upload.single('anexo'), async (req, res)
 // cliente recebe o boleto E o "copia e cola" pronto, sem precisar escanear nada.
 router.post('/conversas/:id/enviar-fatura', async (req, res) => {
   const { id } = req.params;
+  const modo = req.body?.modo === 'pdf' || req.body?.modo === 'pix' ? req.body.modo : 'ambos';
 
   const { data: conversa, error: conversaError } = await supabase
     .from('conversas')
@@ -143,45 +154,59 @@ router.post('/conversas/:id/enviar-fatura', async (req, res) => {
 
   if (conversaError) return res.status(500).json({ error: conversaError.message });
   if (!conversa) return res.status(404).json({ error: 'conversa não encontrada' });
-  if (!conversa.cliente_id || !conversa.clientes?.pdf_url) {
-    return res.status(400).json({ error: 'Este contato não tem fatura (PDF) cadastrada' });
+
+  const cliente = conversa.clientes;
+  if (!conversa.cliente_id || !cliente) {
+    return res.status(400).json({ error: 'Este contato não está vinculado a um cliente cadastrado' });
+  }
+  if (modo === 'pdf' && !cliente.pdf_url) {
+    return res.status(400).json({ error: 'Este cliente não tem fatura (PDF) cadastrada' });
+  }
+  if (modo === 'pix' && !cliente.pix_code) {
+    return res.status(400).json({ error: 'Não encontramos um código Pix nesta fatura' });
+  }
+  if (modo === 'ambos' && !cliente.pdf_url && !cliente.pix_code) {
+    return res.status(400).json({ error: 'Este cliente não tem fatura nem código Pix cadastrados' });
   }
 
   try {
     const { existe, jid } = await validarNumero(conversa.telefone);
     if (!existe) return res.status(400).json({ error: 'Este número não foi encontrado no WhatsApp' });
 
-    const cliente = conversa.clientes;
     const nomeArquivo = `fatura-${cliente.nome || 'cliente'}.pdf`;
 
-    const { messageId } = await enviarMensagemComAnexo({
-      numero: conversa.telefone,
-      jid,
-      anexoUrl: cliente.pdf_url,
-      anexoNome: nomeArquivo,
-      anexoTipo: 'documento',
-      anexoMimetype: 'application/pdf',
-    });
-
-    const { mensagem: linhaFatura } = await registrarMensagemSaida({
-      telefone: conversa.telefone,
-      texto: null,
-      tipo: 'documento',
-      anexoUrl: cliente.pdf_url,
-      anexoNome: nomeArquivo,
-      messageId,
-    });
-
-    let linhaPix = null;
-    if (cliente.pix_code) {
-      const { messageId: pixMessageId } = await enviarMensagemTexto({
+    let linhaFatura = null;
+    if ((modo === 'pdf' || modo === 'ambos') && cliente.pdf_url) {
+      const { messageId } = await enviarMensagemComAnexo({
         numero: conversa.telefone,
         jid,
-        mensagem: `Código Pix (copia e cola):\n${cliente.pix_code}`,
+        anexoUrl: cliente.pdf_url,
+        anexoNome: nomeArquivo,
+        anexoTipo: 'documento',
+        anexoMimetype: 'application/pdf',
       });
       const { mensagem } = await registrarMensagemSaida({
         telefone: conversa.telefone,
-        texto: `Código Pix (copia e cola):\n${cliente.pix_code}`,
+        texto: null,
+        tipo: 'documento',
+        anexoUrl: cliente.pdf_url,
+        anexoNome: nomeArquivo,
+        messageId,
+      });
+      linhaFatura = mensagem;
+    }
+
+    let linhaPix = null;
+    if ((modo === 'pix' || modo === 'ambos') && cliente.pix_code) {
+      const textoPix = `Código Pix (copia e cola):\n${cliente.pix_code}`;
+      const { messageId: pixMessageId } = await enviarMensagemTexto({
+        numero: conversa.telefone,
+        jid,
+        mensagem: textoPix,
+      });
+      const { mensagem } = await registrarMensagemSaida({
+        telefone: conversa.telefone,
+        texto: textoPix,
         tipo: 'texto',
         messageId: pixMessageId,
       });

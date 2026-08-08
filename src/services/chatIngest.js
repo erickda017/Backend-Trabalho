@@ -157,7 +157,18 @@ async function processarMensagem(sock, waMessage) {
   if (!interpretado) return;
 
   const fromMe = Boolean(key.fromMe);
-  const telefone = normalizarTelefone(remoteJid.split('@')[0]);
+
+  // WhatsApp recente pode identificar o contato por um "@lid" (Linked ID, um
+  // identificador de privacidade opaco) em vez do número de telefone real --
+  // isso é cada vez mais comum, não só em casos raros. Se a gente tratasse o
+  // "@lid" como se fosse o número, teria salvo um número aleatório sem
+  // relação nenhuma com o telefone de verdade: cria conversa duplicada (não
+  // bate com o telefone já cadastrado do cliente) e depois, ao tentar
+  // responder, o WhatsApp rejeita porque aquele "número" nunca existiu de
+  // fato. Quando o jid é "@lid", o Baileys manda separado o número de
+  // telefone real em key.senderPn -- é isso que a gente usa nesse caso.
+  const numeroFonte = remoteJid.endsWith('@lid') && key.senderPn ? key.senderPn : remoteJid;
+  const telefone = normalizarTelefone(numeroFonte.split('@')[0]);
   if (!telefone) return;
 
   const quandoIso = waMessage.messageTimestamp

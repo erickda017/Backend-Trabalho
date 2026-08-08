@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
+import XLSX from 'xlsx';
 import { processarImportacao } from '../services/importLote.js';
 
 const router = Router();
@@ -57,5 +58,44 @@ router.post(
     }
   }
 );
+
+// Planilha modelo pra baixar e preencher -- mesmas colunas (com variações aceitas)
+// que parsePlanilha() em importLote.js reconhece. "arquivo" é o nome do PDF dentro
+// do zip que vai ser importado junto; se não usar zip (só disparo por planilha
+// avulsa via seleção manual), pode deixar em branco.
+router.get('/modelo', (req, res) => {
+  const linhas = [
+    {
+      nome: 'Maria da Silva',
+      numero: '11987654321',
+      mensagem: 'Olá {{nome}}, tudo bem? Segue sua fatura no valor de {{valor}}, vencimento {{vencimento}}.',
+      valor: '150.00',
+      vencimento: '10/09/2026',
+      arquivo: 'maria-da-silva.pdf',
+    },
+    {
+      nome: 'João Pereira',
+      numero: '21998765432',
+      mensagem: '',
+      valor: '89.90',
+      vencimento: '15/09/2026',
+      arquivo: 'joao-pereira.pdf',
+    },
+  ];
+
+  const planilha = XLSX.utils.json_to_sheet(linhas, {
+    header: ['nome', 'numero', 'mensagem', 'valor', 'vencimento', 'arquivo'],
+  });
+  planilha['!cols'] = [{ wch: 22 }, { wch: 15 }, { wch: 45 }, { wch: 10 }, { wch: 14 }, { wch: 22 }];
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, planilha, 'clientes');
+
+  const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="modelo-importacao.xlsx"');
+  res.send(buffer);
+});
 
 export default router;

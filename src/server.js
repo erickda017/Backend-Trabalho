@@ -14,6 +14,28 @@ import chatRoutes from './routes/chat.routes.js';
 
 dotenv.config();
 
+// Checagem de variáveis obrigatórias na subida — sem isso o servidor loga um aviso
+// claro e continua no ar (health check passa, rotas de auth funcionam), em vez de
+// crashar sem explicação. Sem essas duas o WhatsApp/banco não funcionam, mas o
+// serviço não cai por isso.
+const obrigatorias = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+const faltando = obrigatorias.filter((v) => !process.env[v]);
+if (faltando.length) {
+  console.error(
+    `[server] AVISO: variável(is) de ambiente faltando: ${faltando.join(', ')}. ` +
+      'O servidor vai subir mesmo assim, mas WhatsApp/banco/disparo não vão funcionar ' +
+      'até você configurar isso no Render (Environment → adicionar as chaves do Supabase).'
+  );
+}
+
+// Rede de segurança: uma promise rejeitada sem .catch() derrubava o processo inteiro
+// (Node trata unhandledRejection como erro fatal por padrão desde a v15). Isso já
+// aconteceu na prática com as chamadas de startup abaixo quando o Supabase não estava
+// configurado ainda. Logamos e seguimos no ar em vez de matar o serviço.
+process.on('unhandledRejection', (reason) => {
+  console.error('[server] promise rejeitada sem tratamento:', reason);
+});
+
 const app = express();
 
 const origensPermitidas = process.env.FRONTEND_ORIGIN
@@ -44,7 +66,14 @@ const PORT = process.env.PORT || 3333;
 
 app.listen(PORT, () => {
   console.log(`[server] rodando em http://localhost:${PORT}`);
-  startWhatsApp();
+
+  // Cada chamada de startup agora tem seu próprio .catch — uma falha em uma (ex:
+  // Supabase mal configurado) não derruba as outras nem o processo inteiro.
+  startWhatsApp().catch((err) =>
+    console.error('[server] falha ao iniciar WhatsApp (servidor continua no ar):', err.message || err)
+  );
   iniciarScheduler();
-  recuperarEnviosTravados();
+  recuperarEnviosTravados().catch((err) =>
+    console.error('[server] falha ao recuperar envios travados:', err.message || err)
+  );
 });

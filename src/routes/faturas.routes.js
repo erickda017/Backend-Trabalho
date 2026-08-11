@@ -9,7 +9,7 @@ const router = Router();
 // Não existe tabela própria -- é uma visão sobre `clientes` filtrada por com_pdf/sem_pdf.
 router.get('/', async (req, res) => {
   const { busca, com_pdf, sem_pdf } = req.query;
-  const { perPage, from, to } = lerPaginacao(req.query);
+  const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
 
   let query = supabase
     .from('clientes')
@@ -20,10 +20,10 @@ router.get('/', async (req, res) => {
   if (com_pdf === 'true' || com_pdf === '1') query = query.not('pdf_url', 'is', null);
   if (sem_pdf === 'true' || sem_pdf === '1') query = query.is('pdf_url', null);
 
-  const { data, error, count } = await query.range(from, to);
+  const { data, error } = await query.range(from, to);
   if (error) return res.status(500).json({ error: error.message });
 
-  res.json({ items: data || [], total: count ?? (data || []).length, page: Math.floor(from / perPage) + 1, per_page: perPage });
+  res.json(data || []);
 });
 
 router.get('/exportar', async (req, res) => {

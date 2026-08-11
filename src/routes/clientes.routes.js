@@ -25,7 +25,7 @@ function achatarTags({ cliente_tags, ...c }) {
 // Lista clientes (paginado, com filtros busca/tag/com_pix/sem_pix)
 router.get('/', async (req, res) => {
   const { busca, tag, com_pix, sem_pix } = req.query;
-  const { perPage, from, to } = lerPaginacao(req.query);
+  const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
 
   let query = supabase
     .from('clientes')
@@ -41,19 +41,14 @@ router.get('/', async (req, res) => {
     const { data: relacoes, error: tagError } = await supabase.from('cliente_tags').select('cliente_id').eq('tag_id', tag);
     if (tagError) return res.status(500).json({ error: tagError.message });
     clienteIdsPorTag = (relacoes || []).map((r) => r.cliente_id);
-    if (!clienteIdsPorTag.length) return res.json({ items: [], total: 0 });
+    if (!clienteIdsPorTag.length) return res.json([]);
     query = query.in('id', clienteIdsPorTag);
   }
 
-  const { data, error, count } = await query.range(from, to);
+  const { data, error } = await query.range(from, to);
   if (error) return res.status(500).json({ error: error.message });
 
-  res.json({
-    items: (data || []).map(achatarTags),
-    total: count ?? (data || []).length,
-    page: Math.floor(from / perPage) + 1,
-    per_page: perPage,
-  });
+  res.json((data || []).map(achatarTags));
 });
 
 // Busca um cliente específico

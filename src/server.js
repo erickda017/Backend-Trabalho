@@ -63,7 +63,7 @@ app.use('/api/tags', requireAuth, tagsRoutes);
 app.use('/api/respostas-rapidas', requireAuth, respostasRapidasRoutes);
 app.use('/api/dashboard', requireAuth, dashboardRoutes);
 app.use('/api/configuracoes', requireAuth, configuracoesRoutes);
-app.use('/api/pix', requireAuth, pixRoutes);
+app.use('/api/pix/extracoes', requireAuth, pixRoutes);
 app.use('/api/faturas', requireAuth, faturasRoutes);
 
 // Handler de erro global -- sem isso, erros como multer (arquivo grande demais, tipo

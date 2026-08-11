@@ -253,8 +253,8 @@ router.get('/:id', async (req, res) => {
 // Itens de um envio (paginado, com filtro por status/busca no nome/telefone do cliente)
 router.get('/:id/itens', async (req, res) => {
   const { id } = req.params;
-  const { status, busca } = req.query;
-  const { perPage, from, to } = lerPaginacao(req.query, { perPageDefault: 50 });
+  const { filtro, busca } = req.query;
+  const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
 
   let clienteIdsFiltrados = null;
   if (busca) {
@@ -264,22 +264,22 @@ router.get('/:id/itens', async (req, res) => {
       .or(`nome.ilike.%${busca}%,telefone.ilike.%${busca}%`);
     if (buscaError) return res.status(500).json({ error: buscaError.message });
     clienteIdsFiltrados = (clientesEncontrados || []).map((c) => c.id);
-    if (!clienteIdsFiltrados.length) return res.json({ items: [], total: 0 });
+    if (!clienteIdsFiltrados.length) return res.json([]);
   }
 
   let query = supabase
     .from('envio_itens')
-    .select('*, clientes(nome, telefone, valor, vencimento)', { count: 'exact' })
+    .select('*, clientes(nome, telefone, valor, vencimento)')
     .eq('envio_id', id)
     .order('created_at', { ascending: true });
 
-  if (status) query = query.eq('status', status);
+  if (filtro && filtro !== 'todos') query = query.eq('status', filtro);
   if (clienteIdsFiltrados) query = query.in('cliente_id', clienteIdsFiltrados);
 
-  const { data, error, count } = await query.range(from, to);
+  const { data, error } = await query.range(from, to);
   if (error) return res.status(500).json({ error: error.message });
 
-  res.json({ items: data || [], total: count ?? (data || []).length, page: Math.floor(from / perPage) + 1, per_page: perPage });
+  res.json(data || []);
 });
 
 // Contadores leves pra polling durante o disparo (mesmo shape do resumo, sem overhead)
@@ -291,27 +291,44 @@ router.get('/:id/progresso', async (req, res) => {
 
   const { data: itens, error: itensError } = await supabase
     .from('envio_itens')
-    .select('status, status_entrega')
+    .select('status, status_entrega, slot, enviado_em')
     .eq('envio_id', id);
   if (itensError) return res.status(500).json({ error: itensError.message });
 
-  res.json({ id: envio.id, status: envio.status, ...agregarContadores(itens || []) });
+  const enviados = (itens || [])
+    .filter((i) => i.enviado_em)
+    .sort((a, b) => (b.enviado_em || '').localeCompare(a.enviado_em || ''));
+  const ultimo = enviados[0] || null;
+
+  const { data: config } = await supabase.from('estrategia_config').select('next_slot').eq('id', true).maybeSingle();
+
+  res.json({
+    id: envio.id,
+    status: envio.status,
+    ...agregarContadores(itens || []),
+    ultimo_envio_em: ultimo?.enviado_em ?? null,
+    slot_atual: ultimo?.slot ?? null,
+    proximo_slot: config?.next_slot ?? null,
+  });
 });
 
 // Lista envios (paginado, com filtros)
 router.get('/', async (req, res) => {
   const { busca, status, de, ate, slot } = req.query;
-  const { perPage, from, to } = lerPaginacao(req.query);
+  const { from, to } = lerPaginacao(req.query, { perPageDefault: 500, perPageMax: 5000 });
 
   let query = supabase.from('envios').select('*', { count: 'exact' }).order('created_at', { ascending: false });
 
   if (busca) query = query.or(`lote.ilike.%${busca}%,template_mensagem.ilike.%${busca}%`);
-  if (status) query = query.eq('status', status);
-  if (slot) query = query.eq('slot', slot);
+  if (status && status !== 'todos') query = query.eq('status', status);
+  if (slot && slot !== 'todos') {
+    const slotNum = Number(slot);
+    if (Number.isInteger(slotNum)) query = query.eq('slot', slotNum);
+  }
   if (de) query = query.gte('created_at', de);
   if (ate) query = query.lte('created_at', ate);
 
-  const { data: envios, error, count } = await query.range(from, to);
+  const { data: envios, error } = await query.range(from, to);
   if (error) return res.status(500).json({ error: error.message });
 
   const ids = (envios || []).map((e) => e.id);
@@ -330,7 +347,7 @@ router.get('/', async (req, res) => {
 
   const items = (envios || []).map((envio) => montarEnvioResumo(envio, agregarContadores(itensPorEnvio.get(envio.id) || [])));
 
-  res.json({ items, total: count ?? items.length, page: Math.floor(from / perPage) + 1, per_page: perPage });
+  res.json(items);
 });
 
 export default router;

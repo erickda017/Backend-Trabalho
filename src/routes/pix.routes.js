@@ -78,7 +78,7 @@ function serializar(linha) {
 
 router.get('/', async (req, res) => {
   const { busca, status, cliente_id } = req.query;
-  const { perPage, from, to } = lerPaginacao(req.query);
+  const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
 
   let query = supabase
     .from('pix_extracoes')
@@ -86,13 +86,13 @@ router.get('/', async (req, res) => {
     .order('criado_em', { ascending: false });
 
   if (busca) query = query.ilike('arquivo', `%${busca}%`);
-  if (status) query = query.eq('status', status);
+  if (status && status !== 'todos') query = query.eq('status', status);
   if (cliente_id) query = query.eq('cliente_id', cliente_id);
 
-  const { data, error, count } = await query.range(from, to);
+  const { data, error } = await query.range(from, to);
   if (error) return res.status(500).json({ error: error.message });
 
-  res.json({ items: (data || []).map(serializar), total: count ?? (data || []).length });
+  res.json((data || []).map(serializar));
 });
 
 // Sobe N PDFs (campo repetido `arquivos`) e processa a extração de cada um.

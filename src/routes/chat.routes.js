@@ -24,17 +24,7 @@ router.get('/conversas', async (req, res) => {
     .order('ultima_mensagem_em', { ascending: false, nullsFirst: false });
 
   if (error) return res.status(500).json({ error: error.message });
-  const items = (data || []).map((c) => ({
-    id: c.id,
-    cliente_id: c.cliente_id,
-    nome: c.nome_contato || c.clientes?.nome || null,
-    telefone: c.telefone,
-    ultima_mensagem: c.ultima_mensagem,
-    ultima_em: c.ultima_mensagem_em,
-    nao_lidas: c.nao_lidas,
-    slot: c.slot ?? null,
-  }));
-  res.json({ items });
+  res.json(data || []);
 });
 
 // Histórico de mensagens de uma conversa
@@ -49,16 +39,7 @@ router.get('/conversas/:id/mensagens', async (req, res) => {
     .limit(500);
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json({
-    items: (data || []).map((m) => ({
-      id: m.id,
-      direcao: m.direcao === 'saida' ? 'out' : 'in',
-      texto: m.texto,
-      anexo_url: m.anexo_url,
-      criado_em: m.created_at,
-      status: m.status_entrega,
-    })),
-  });
+  res.json(data || []);
 });
 
 // Apaga a conversa e o histórico de mensagens dela (ex: contatos de teste, ou

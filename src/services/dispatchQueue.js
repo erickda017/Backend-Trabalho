@@ -1,5 +1,5 @@
 import { supabase } from '../lib/supabase.js';
-import { enviarMensagemComPdf, enviarMensagemTexto, validarNumero } from './whatsapp.js';
+import { enviarMensagemComPdf, enviarMensagemTexto, validarNumero, isConnected } from './whatsapp.js';
 import { escolherSlot } from '../lib/estrategia.js';
 import { dispararWebhook } from './webhook.js';
 import { registrarMensagemSaida } from './chatIngest.js';
@@ -13,6 +13,11 @@ const DAILY_LIMIT = Number(process.env.DAILY_LIMIT || 100);
 // A cada N mensagens enviadas, faz uma pausa mais longa (simula comportamento humano)
 const BATCH_SIZE = Number(process.env.BATCH_SIZE || 20);
 const BATCH_PAUSE_MS = Number(process.env.BATCH_PAUSE_MS || 10 * 60 * 1000); // 10 min
+
+// Se a conexão WhatsApp cair no meio de um disparo, pausa e tenta de novo depois
+// desse intervalo (o scheduler.js verifica envios 'pausado' a cada 1 min) -- em vez
+// de continuar o loop e marcar CADA item restante como 'erro' um por um.
+const RECONEXAO_RETRY_MS = Number(process.env.RECONEXAO_RETRY_MS || 2 * 60 * 1000); // 2 min
 
 let isRunning = false;
 let contadorLote = 0;
@@ -176,6 +181,32 @@ export async function processarDisparo(envioId) {
 
     try {
       for (const item of itens) {
+        // Sem isso: se o WhatsApp cair no meio do disparo (ex: celular sem internet,
+        // sessão derrubada), o loop continuava e marcava CADA item restante como
+        // 'erro' um por um -- ainda esperando o delay normal entre eles -- em vez de
+        // parar. Com 300 itens pendentes isso significava minutos/horas queimando a
+        // fila inteira em erro por nada. Agora, se não há conexão disponível pro slot
+        // que esse envio usa, pausa (fica 'pendente' pra tentar de novo) e o
+        // scheduler.js retoma sozinho quando -- e se -- a conexão voltar.
+        if (!isConnected(envio.slot)) {
+          const retomarEm = new Date(Date.now() + RECONEXAO_RETRY_MS);
+          await supabase
+            .from('envios')
+            .update({ status: 'pausado', retomar_em: retomarEm.toISOString() })
+            .eq('id', envioId);
+
+          await dispararWebhook('disparo_pausado_sem_conexao', {
+            envio_id: envioId,
+            slot: envio.slot || null,
+            retomar_em: retomarEm.toISOString(),
+          });
+
+          console.log(
+            `[dispatch] conexão WhatsApp indisponível (slot ${envio.slot || 'qualquer'}), pausando disparo ${envioId}. Retomando em ${retomarEm.toISOString()}`
+          );
+          return;
+        }
+
         if (DAILY_LIMIT > 0) {
           const enviadosHoje = await contarEnviadosHoje();
           if (enviadosHoje >= DAILY_LIMIT) {

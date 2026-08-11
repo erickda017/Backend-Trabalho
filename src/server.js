@@ -76,7 +76,7 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3333;
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`[server] rodando em http://localhost:${PORT}`);
 
   // Cada chamada de startup agora tem seu próprio .catch — uma falha em uma (ex:
@@ -89,3 +89,11 @@ app.listen(PORT, () => {
     console.error('[server] falha ao recuperar envios travados:', err.message || err)
   );
 });
+
+// Importação de planilha grande (ex: 300+ clientes/PDFs) pode levar minutos --
+// o timeout padrão de requisição do Node (5 min desde a v18) derrubava a conexão
+// no meio do processamento, mesmo com o back-end ainda trabalhando normalmente.
+// Desativa o timeout aqui; quem ainda limita isso é o proxy da hospedagem (ex:
+// Render), que fica fora do nosso controle -- ver nota no README_CLAUDE_BACKEND.md.
+server.requestTimeout = 0;
+server.headersTimeout = 0;

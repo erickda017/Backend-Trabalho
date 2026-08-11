@@ -15,6 +15,7 @@ import {
   isConnected,
 } from '../services/whatsapp.js';
 import { normalizarTelefone } from '../lib/telefone.js';
+import { escaparFiltroPostgrest } from '../lib/filtros.js';
 
 const router = Router();
 
@@ -258,10 +259,11 @@ router.get('/:id/itens', async (req, res) => {
 
   let clienteIdsFiltrados = null;
   if (busca) {
+    const buscaEscapada = escaparFiltroPostgrest(busca);
     const { data: clientesEncontrados, error: buscaError } = await supabase
       .from('clientes')
       .select('id')
-      .or(`nome.ilike.%${busca}%,telefone.ilike.%${busca}%`);
+      .or(`nome.ilike.%${buscaEscapada}%,telefone.ilike.%${buscaEscapada}%`);
     if (buscaError) return res.status(500).json({ error: buscaError.message });
     clienteIdsFiltrados = (clientesEncontrados || []).map((c) => c.id);
     if (!clienteIdsFiltrados.length) return res.json([]);
@@ -319,7 +321,7 @@ router.get('/', async (req, res) => {
 
   let query = supabase.from('envios').select('*', { count: 'exact' }).order('created_at', { ascending: false });
 
-  if (busca) query = query.or(`lote.ilike.%${busca}%,template_mensagem.ilike.%${busca}%`);
+  if (busca) query = query.or(`lote.ilike.%${escaparFiltroPostgrest(busca)}%,template_mensagem.ilike.%${escaparFiltroPostgrest(busca)}%`);
   if (status && status !== 'todos') query = query.eq('status', status);
   if (slot && slot !== 'todos') {
     const slotNum = Number(slot);

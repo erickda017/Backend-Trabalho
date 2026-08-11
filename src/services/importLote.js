@@ -93,10 +93,73 @@ async function mapComConcorrencia(itens, limite, tarefa) {
   return resultados;
 }
 
-const CONCORRENCIA_IMPORTACAO = Number(process.env.IMPORTACAO_CONCORRENCIA || 6);
+// Era 6 por padrão. Cada linha em andamento mantém em memória, ao mesmo tempo:
+// o buffer do PDF, o canvas renderizado (scale 2.0, potencialmente várias
+// páginas) usado pra achar o QR do Pix, e a resposta do upload pro Supabase.
+// Em planos com pouca RAM (ex: Render free, 512MB) 6 desses em paralelo -- com
+// o zip inteiro (pode passar de 200MB) já carregado no processo -- estourava a
+// memória e derrubava o processo inteiro (WhatsApp incluso, que roda no mesmo
+// processo). 2 é bem mais seguro; ajuste pra cima via env var só se o plano de
+// hospedagem tiver RAM de sobra.
+const CONCORRENCIA_IMPORTACAO = Number(process.env.IMPORTACAO_CONCORRENCIA || 2);
 
-// Processa planilha + zip: cria/atualiza clientes, faz upload dos PDFs e monta o lote de envio.
-// Retorna um resumo com o que deu certo e o que ficou pendente (sem PDF ou sem numero/nome).
+// Monta o resumo (sucesso/semPdf/semDadosObrigatorios) e cria o lote de envio a
+// partir de uma lista de resultados por linha já processados. Compartilhado
+// pelos dois fluxos de importação (server-side com PDF binário, e client-side
+// já processado no navegador) -- a parte de "criar envio + itens" é idêntica
+// nos dois, só muda como cada linha chega até aqui.
+async function montarResumoECriarEnvio(totalLinhas, processadas, templateMensagemPadrao) {
+  const resultado = {
+    total: totalLinhas,
+    sucesso: [],
+    semPdf: [],
+    semDadosObrigatorios: [],
+  };
+
+  const clienteIdsParaEnvio = [];
+  const mensagensPorCliente = new Map(); // cliente_id -> mensagem_override (se a planilha trouxer mensagem por linha)
+
+  for (const r of processadas) {
+    if (r.tipo === 'semDados') {
+      resultado.semDadosObrigatorios.push(r.linha);
+    } else if (r.tipo === 'semPdf') {
+      resultado.semPdf.push(r.linha);
+    } else {
+      clienteIdsParaEnvio.push(r.cliente_id);
+      if (r.linha.mensagem) mensagensPorCliente.set(r.cliente_id, r.linha.mensagem);
+      resultado.sucesso.push({ ...r.linha, cliente_id: r.cliente_id });
+    }
+  }
+
+  if (clienteIdsParaEnvio.length === 0) {
+    return { ...resultado, envio: null };
+  }
+
+  // cria o lote de envio já com os itens prontos (status pendente, aguardando o clique de "Disparar")
+  const { data: envio, error: envioError } = await supabase
+    .from('envios')
+    .insert({ template_mensagem: templateMensagemPadrao, status: 'pendente' })
+    .select()
+    .single();
+
+  if (envioError) throw envioError;
+
+  const itens = clienteIdsParaEnvio.map((cliente_id) => ({
+    envio_id: envio.id,
+    cliente_id,
+    status: 'pendente',
+    mensagem_override: mensagensPorCliente.get(cliente_id) || null,
+  }));
+
+  const { error: itensError } = await supabase.from('envio_itens').insert(itens);
+  if (itensError) throw itensError;
+
+  return { ...resultado, envio };
+}
+
+// Processa planilha + zip (server-side, com PDF): cria/atualiza clientes, faz
+// upload dos PDFs e monta o lote de envio. Retorna um resumo com o que deu
+// certo e o que ficou pendente (sem PDF ou sem numero/nome).
 export async function processarImportacao({ planilhaBuffer, zipBuffer, templateMensagemPadrao }) {
   const linhas = parsePlanilha(planilhaBuffer);
   const pdfsPorNome = extrairPdfsDoZip(zipBuffer);
@@ -182,51 +245,72 @@ export async function processarImportacao({ planilhaBuffer, zipBuffer, templateM
   }
 
   const processadas = await mapComConcorrencia(linhas, CONCORRENCIA_IMPORTACAO, processarLinha);
+  return montarResumoECriarEnvio(linhas.length, processadas, templateMensagemPadrao);
+}
 
-  const resultado = {
-    total: linhas.length,
-    sucesso: [],
-    semPdf: [],
-    semDadosObrigatorios: [],
-  };
+// Concorrência do upsert client-side: aqui NÃO há mais PDF/canvas/QR envolvido
+// (isso já foi feito no navegador antes de chegar aqui) -- cada item é só um
+// upsert + update de metadados no Supabase, uma chamada de rede leve. Pode ser
+// bem mais alto que CONCORRENCIA_IMPORTACAO sem risco de RAM.
+const CONCORRENCIA_UPSERT_LOTE = Number(process.env.IMPORTACAO_LOTE_CONCORRENCIA || 8);
 
-  const clienteIdsParaEnvio = [];
-  const mensagensPorCliente = new Map(); // cliente_id -> mensagem_override (se a planilha trouxer mensagem por linha)
-
-  for (const r of processadas) {
-    if (r.tipo === 'semDados') {
-      resultado.semDadosObrigatorios.push(r.linha);
-    } else if (r.tipo === 'semPdf') {
-      resultado.semPdf.push(r.linha);
-    } else {
-      clienteIdsParaEnvio.push(r.cliente_id);
-      if (r.linha.mensagem) mensagensPorCliente.set(r.cliente_id, r.linha.mensagem);
-      resultado.sucesso.push({ ...r.linha, cliente_id: r.cliente_id });
+// Processa um lote já preparado no navegador: parsing da planilha, casamento
+// com PDF, upload pro Storage e extração de Pix já aconteceram no CLIENTE (ver
+// frontend/src/lib/importacaoBrowser.ts e pixFromPdfBrowser.ts) -- rodando com a
+// RAM/CPU de quem está importando, não do servidor. Aqui só falta: 1) upsert do
+// cliente por telefone, 2) gravar os metadados (pdf_url/pdf_path/pix_code) que
+// já vieram prontos, 3) montar o lote de envio -- tudo leve o bastante pra nunca
+// aproximar de estourar a memória do servidor, mesmo com centenas de linhas.
+//
+// `itensProntos` é um array de:
+//   { linha, numero, nome, valor, vencimento, mensagem, telefoneNormalizado,
+//     pdf_url, pdf_path, pix_code }
+// (pdf_url/pdf_path vêm nulos quando a linha não tinha PDF casado no zip --
+// tratado como 'semPdf', igual ao fluxo antigo)
+// `linhasSemDados` é o array de linhas que já vieram marcadas como inválidas
+// do navegador (sem numero/nome, ou telefone que não normalizou).
+export async function processarImportacaoLotePronto({ itensProntos, linhasSemDados, templateMensagemPadrao }) {
+  async function processarItem(item) {
+    if (!item.pdf_url) {
+      return { tipo: 'semPdf', linha: item };
     }
+
+    // upsert do cliente por telefone (evita duplicar se reimportar a planilha) --
+    // mesmo comportamento do fluxo server-side.
+    const { data: cliente, error: clienteError } = await supabase
+      .from('clientes')
+      .upsert(
+        {
+          nome: item.nome,
+          telefone: item.telefoneNormalizado,
+          valor: item.valor,
+          vencimento: item.vencimento,
+        },
+        { onConflict: 'telefone' },
+      )
+      .select()
+      .single();
+
+    if (clienteError) {
+      return { tipo: 'semDados', linha: { ...item, erro: clienteError.message } };
+    }
+
+    const { error: updateError } = await supabase
+      .from('clientes')
+      .update({ pdf_url: item.pdf_url, pdf_path: item.pdf_path, pix_code: item.pix_code ?? null })
+      .eq('id', cliente.id);
+
+    if (updateError) {
+      return { tipo: 'semDados', linha: { ...item, erro: updateError.message } };
+    }
+
+    return { tipo: 'sucesso', linha: item, cliente_id: cliente.id };
   }
 
-  if (clienteIdsParaEnvio.length === 0) {
-    return { ...resultado, envio: null };
-  }
+  const processadasItens = await mapComConcorrencia(itensProntos, CONCORRENCIA_UPSERT_LOTE, processarItem);
+  const processadasSemDados = linhasSemDados.map((linha) => ({ tipo: 'semDados', linha }));
+  const todasProcessadas = [...processadasSemDados, ...processadasItens];
+  const totalLinhas = itensProntos.length + linhasSemDados.length;
 
-  // cria o lote de envio já com os itens prontos (status pendente, aguardando o clique de "Disparar")
-  const { data: envio, error: envioError } = await supabase
-    .from('envios')
-    .insert({ template_mensagem: templateMensagemPadrao, status: 'pendente' })
-    .select()
-    .single();
-
-  if (envioError) throw envioError;
-
-  const itens = clienteIdsParaEnvio.map((cliente_id) => ({
-    envio_id: envio.id,
-    cliente_id,
-    status: 'pendente',
-    mensagem_override: mensagensPorCliente.get(cliente_id) || null,
-  }));
-
-  const { error: itensError } = await supabase.from('envio_itens').insert(itens);
-  if (itensError) throw itensError;
-
-  return { ...resultado, envio };
+  return montarResumoECriarEnvio(totalLinhas, todasProcessadas, templateMensagemPadrao);
 }

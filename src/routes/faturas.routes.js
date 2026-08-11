@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { responderExportacao } from '../lib/exportar.js';
+import { escaparFiltroPostgrest } from '../lib/filtros.js';
 
 const router = Router();
 
@@ -16,7 +17,7 @@ router.get('/', async (req, res) => {
     .select('id, nome, telefone, valor, vencimento, pdf_url, pdf_path, pix_code', { count: 'exact' })
     .order('nome');
 
-  if (busca) query = query.or(`nome.ilike.%${busca}%,telefone.ilike.%${busca}%`);
+  if (busca) query = query.or(`nome.ilike.%${escaparFiltroPostgrest(busca)}%,telefone.ilike.%${escaparFiltroPostgrest(busca)}%`);
   if (com_pdf === 'true' || com_pdf === '1') query = query.not('pdf_url', 'is', null);
   if (sem_pdf === 'true' || sem_pdf === '1') query = query.is('pdf_url', null);
 

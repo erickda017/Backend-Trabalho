@@ -4,6 +4,7 @@ import { supabase, BUCKET } from '../lib/supabase.js';
 import { normalizarTelefone } from '../lib/telefone.js';
 import { extrairPixDoPdf } from '../lib/pixFromPdf.js';
 import { lerPaginacao } from '../lib/paginacao.js';
+import { escaparFiltroPostgrest } from '../lib/filtros.js';
 
 const router = Router();
 const upload = multer({
@@ -32,7 +33,10 @@ router.get('/', async (req, res) => {
     .select('*, cliente_tags(tags(id, nome, cor))', { count: 'exact' })
     .order('nome');
 
-  if (busca) query = query.or(`nome.ilike.%${busca}%,telefone.ilike.%${busca}%`);
+  if (busca) {
+    const buscaEscapada = escaparFiltroPostgrest(busca);
+    query = query.or(`nome.ilike.%${buscaEscapada}%,telefone.ilike.%${buscaEscapada}%`);
+  }
   if (com_pix === 'true' || com_pix === '1') query = query.not('pix_code', 'is', null);
   if (sem_pix === 'true' || sem_pix === '1') query = query.is('pix_code', null);
 

@@ -10,18 +10,31 @@ export async function dispararWebhook(evento, dados) {
   if (!WEBHOOK_URL) return;
 
   try {
-    await fetch(WEBHOOK_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(WEBHOOK_SECRET ? { 'X-Webhook-Secret': WEBHOOK_SECRET } : {}),
-      },
-      body: JSON.stringify({
-        evento,
-        dados,
-        timestamp: new Date().toISOString(),
-      }),
-    });
+    // Timeout de segurança -- sem isso, um endpoint de webhook do usuário que
+    // trava/não responde deixava essa chamada pendurada indefinidamente. Como
+    // dispararWebhook é chamado a cada mensagem enviada/status de entrega (pode
+    // ser bem frequente durante um disparo em massa), isso podia acumular
+    // conexões HTTP penduradas ao longo do tempo.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+    try {
+      await fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(WEBHOOK_SECRET ? { 'X-Webhook-Secret': WEBHOOK_SECRET } : {}),
+        },
+        body: JSON.stringify({
+          evento,
+          dados,
+          timestamp: new Date().toISOString(),
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
   } catch (err) {
     console.error(`[webhook] falha ao notificar evento "${evento}":`, err.message);
   }

@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase.js';
 import { extrairPixDoPdf } from '../lib/pixFromPdf.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { responderExportacao } from '../lib/exportar.js';
+import { escaparFiltroPostgrest } from '../lib/filtros.js';
 
 const router = Router();
 const PIX_BUCKET = process.env.SUPABASE_PIX_BUCKET || 'pix-extracoes';
@@ -22,7 +23,7 @@ const upload = multer({
 async function tentarAcharCliente(nomeArquivo) {
   const nomeBase = nomeArquivo.replace(/\.pdf$/i, '').trim();
   if (!nomeBase) return null;
-  const { data } = await supabase.from('clientes').select('id').ilike('nome', `%${nomeBase}%`).limit(1).maybeSingle();
+  const { data } = await supabase.from('clientes').select('id').ilike('nome', `%${escaparFiltroPostgrest(nomeBase)}%`).limit(1).maybeSingle();
   return data?.id || null;
 }
 
@@ -85,7 +86,7 @@ router.get('/', async (req, res) => {
     .select('*, clientes(nome)', { count: 'exact' })
     .order('criado_em', { ascending: false });
 
-  if (busca) query = query.ilike('arquivo', `%${busca}%`);
+  if (busca) query = query.ilike('arquivo', `%${escaparFiltroPostgrest(busca)}%`);
   if (status && status !== 'todos') query = query.eq('status', status);
   if (cliente_id) query = query.eq('cliente_id', cliente_id);
 
@@ -95,30 +96,61 @@ router.get('/', async (req, res) => {
   res.json((data || []).map(serializar));
 });
 
+// Roda `tarefa` para cada item de `itens`, no máximo `limite` em paralelo por vez.
+// Mesma lógica de importLote.js -- aqui evita que subir vários PDFs de uma vez
+// (campo "arquivos", múltiplos arquivos) processe tudo 100% sequencial dentro do
+// mesmo request/response, o que prendia a conexão HTTP por minutos com poucos
+// arquivos e competia mal por CPU com a sessão do WhatsApp no mesmo processo.
+async function mapComConcorrencia(itens, limite, tarefa) {
+  const resultados = new Array(itens.length);
+  let proximo = 0;
+
+  async function worker() {
+    while (proximo < itens.length) {
+      const indice = proximo++;
+      resultados[indice] = await tarefa(itens[indice], indice);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limite, itens.length) }, () => worker());
+  await Promise.all(workers);
+  return resultados;
+}
+
+const CONCORRENCIA_PIX = Number(process.env.PIX_EXTRACAO_CONCORRENCIA || 2);
+
 // Sobe N PDFs (campo repetido `arquivos`) e processa a extração de cada um.
 router.post('/', upload.array('arquivos'), async (req, res) => {
   const arquivos = req.files || [];
   if (!arquivos.length) return res.status(400).json({ error: 'envie ao menos um arquivo PDF (campo "arquivos")' });
 
   try {
-    const resultados = [];
-    for (const arquivo of arquivos) {
-      const caminho = `${Date.now()}-${arquivo.originalname}`;
-      const { error: uploadError } = await supabase.storage
-        .from(PIX_BUCKET)
-        .upload(caminho, arquivo.buffer, { contentType: 'application/pdf', upsert: true });
-      if (uploadError) throw uploadError;
+    async function processarArquivo(arquivo) {
+      try {
+        const caminho = `${Date.now()}-${arquivo.originalname}`;
+        const { error: uploadError } = await supabase.storage
+          .from(PIX_BUCKET)
+          .upload(caminho, arquivo.buffer, { contentType: 'application/pdf', upsert: true });
+        if (uploadError) throw uploadError;
 
-      const { data: linha, error: insertError } = await supabase
-        .from('pix_extracoes')
-        .insert({ arquivo: arquivo.originalname, storage_path: caminho, status: 'aguardando' })
-        .select()
-        .single();
-      if (insertError) throw insertError;
+        const { data: linha, error: insertError } = await supabase
+          .from('pix_extracoes')
+          .insert({ arquivo: arquivo.originalname, storage_path: caminho, status: 'aguardando' })
+          .select()
+          .single();
+        if (insertError) throw insertError;
 
-      const processada = await processarExtracao(linha);
-      resultados.push(serializar(processada));
+        const processada = await processarExtracao(linha);
+        return serializar(processada);
+      } catch (err) {
+        // Um arquivo com erro de upload/insert (ex: nome inválido, falha de rede
+        // pontual no Storage) não deve derrubar o lote inteiro -- os outros PDFs
+        // do mesmo request continuam sendo processados normalmente.
+        return { arquivo: arquivo.originalname, status: 'erro', erro: err.message };
+      }
     }
+
+    const resultados = await mapComConcorrencia(arquivos, CONCORRENCIA_PIX, processarArquivo);
 
     res.status(201).json(resultados);
   } catch (err) {

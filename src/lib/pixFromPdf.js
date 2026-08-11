@@ -18,14 +18,20 @@ function ehCodigoPix(texto) {
 // NENHUM (os múltiplos padrões de localização confundem o algoritmo, ele falha
 // fechado em vez de escolher errado). Por outro lado, um QR grande sozinho na
 // página pode ficar maior que um bloco da grade e não ser detectado se a
-// grade for fina demais. Por isso testa VÁRIAS granularidades de grade (página
-// inteira, 2x2, 3x3, 4x4) e junta tudo que foi achado em qualquer uma -- cobre
-// tanto o caso "um QR grande sozinho" quanto "vários QR pequenos disputando
-// espaço".
+// grade for fina demais.
+//
+// ANTES: testava grades 1x1, 2x2, 3x3 e 4x4 (30 blocos, 30 getImageData + 30
+// decodificações de QR por página). Com dezenas/centenas de PDFs multi-página
+// em importação e concorrência > 1, isso sozinho é o maior consumidor de CPU/RAM
+// do fluxo de importação (chegava a travar o event loop e derrubar o processo
+// -- inclusive a sessão do WhatsApp, que roda no mesmo processo). Reduz para
+// grades 1x1 e 2x2 (5 blocos), que cobre a esmagadora maioria dos boletos reais
+// (QR único e razoavelmente grande na página), e SÓ tenta 3x3 como último
+// recurso, se as grades mais baratas não acharem nada -- caso raro.
 function escanearBlocos(ctx, largura, altura) {
   const achados = new Set();
 
-  for (const grade of [1, 2, 3, 4]) {
+  function tentarGrade(grade) {
     const sobreposicao = 0.2; // 20% -- garante que um QR na borda de um bloco apareça inteiro em algum bloco vizinho
     const tileW = largura / grade;
     const tileH = altura / grade;
@@ -43,22 +49,51 @@ function escanearBlocos(ctx, largura, altura) {
       }
     }
   }
+
+  tentarGrade(1);
+  tentarGrade(2);
+  if (achados.size === 0) tentarGrade(3); // fallback caro, só quando necessário
+
   return achados;
+}
+
+// Timeout de segurança por PDF -- um único documento corrompido, com página
+// gigante ou muitas imagens pode travar a renderização por tempo desproporcional.
+// Sem isso, um PDF problemático no meio de uma importação de 100+ arquivos podia
+// prender o worker (e, por extensão, atrasar toda a fila) por minutos.
+const TIMEOUT_POR_PDF_MS = 15_000;
+
+function comTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(null), ms)),
+  ]);
 }
 
 // Renderiza cada página do PDF como imagem e tenta achar um QR code Pix entre
 // possivelmente vários QRs na mesma página. Retorna o código Pix (string) ou
 // null se não achar nenhum QR que bata com o padrão Pix.
 export async function extrairPixDoPdf(buffer) {
+  return comTimeout(extrairPixDoPdfSemTimeout(buffer), TIMEOUT_POR_PDF_MS);
+}
+
+async function extrairPixDoPdfSemTimeout(buffer) {
   try {
     const data = new Uint8Array(buffer);
     const doc = await pdfjsLib.getDocument({ data, disableFontFace: true }).promise;
 
-    for (let i = 1; i <= doc.numPages; i++) {
+    // Limita a busca às primeiras 3 páginas -- na prática o QR do Pix sempre
+    // está bem no início do boleto (capa/1ª via). Documentos com muitas páginas
+    // (anexos, contratos) só faziam a importação gastar tempo/memória à toa
+    // renderizando páginas de texto sem QR nenhum.
+    const paginasParaChecar = Math.min(doc.numPages, 3);
+
+    for (let i = 1; i <= paginasParaChecar; i++) {
       const page = await doc.getPage(i);
-      // scale 2.5 dá DPI suficiente pro jsQR achar um QR pequeno numa página A4
-      // sem gastar memória/tempo demais com scale mais alto.
-      const viewport = page.getViewport({ scale: 2.5 });
+      // scale 2.0 já dá DPI suficiente pro jsQR achar um QR pequeno numa página
+      // A4 (era 2.5 -- reduzir gera um canvas ~35% menor em pixels, cortando
+      // proporcionalmente o custo de renderização e de cada getImageData).
+      const viewport = page.getViewport({ scale: 2.0 });
       const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
       const ctx = canvas.getContext('2d');
 

@@ -49,7 +49,13 @@ const origensPermitidas = process.env.FRONTEND_ORIGIN
   : true; // sem restrição em dev, se a env var não estiver setada
 
 app.use(cors({ origin: origensPermitidas }));
-app.use(express.json());
+// Limite maior que o default (100kb) por causa da importação client-side
+// (POST /api/importacao/lote): o payload é só texto (nome, telefone, URLs do
+// Storage, código Pix) para até 1000 linhas, o que pode passar de 100kb em
+// lotes grandes. 5MB dá folga confortável sem risco real de RAM -- é texto, não
+// o PDF binário que costumava vir junto (esse nunca mais passa pelo servidor
+// nesse fluxo).
+app.use(express.json({ limit: '5mb' }));
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 

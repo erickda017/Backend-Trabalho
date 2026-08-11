@@ -3,6 +3,7 @@ import multer from 'multer';
 import { supabase, BUCKET } from '../lib/supabase.js';
 import { normalizarTelefone } from '../lib/telefone.js';
 import { extrairPixDoPdf } from '../lib/pixFromPdf.js';
+import { lerPaginacao } from '../lib/paginacao.js';
 
 const router = Router();
 const upload = multer({
@@ -16,21 +17,57 @@ const upload = multer({
   },
 });
 
-// Lista clientes (com tags atribuídas)
+// Achata cliente_tags(tags(...)) pra um array simples `tags: [{id,nome,cor}]`
+function achatarTags({ cliente_tags, ...c }) {
+  return { ...c, tags: (cliente_tags || []).map((ct) => ct.tags).filter(Boolean) };
+}
+
+// Lista clientes (paginado, com filtros busca/tag/com_pix/sem_pix)
 router.get('/', async (req, res) => {
+  const { busca, tag, com_pix, sem_pix } = req.query;
+  const { perPage, from, to } = lerPaginacao(req.query);
+
+  let query = supabase
+    .from('clientes')
+    .select('*, cliente_tags(tags(id, nome, cor))', { count: 'exact' })
+    .order('nome');
+
+  if (busca) query = query.or(`nome.ilike.%${busca}%,telefone.ilike.%${busca}%`);
+  if (com_pix === 'true' || com_pix === '1') query = query.not('pix_code', 'is', null);
+  if (sem_pix === 'true' || sem_pix === '1') query = query.is('pix_code', null);
+
+  let clienteIdsPorTag = null;
+  if (tag) {
+    const { data: relacoes, error: tagError } = await supabase.from('cliente_tags').select('cliente_id').eq('tag_id', tag);
+    if (tagError) return res.status(500).json({ error: tagError.message });
+    clienteIdsPorTag = (relacoes || []).map((r) => r.cliente_id);
+    if (!clienteIdsPorTag.length) return res.json({ items: [], total: 0 });
+    query = query.in('id', clienteIdsPorTag);
+  }
+
+  const { data, error, count } = await query.range(from, to);
+  if (error) return res.status(500).json({ error: error.message });
+
+  res.json({
+    items: (data || []).map(achatarTags),
+    total: count ?? (data || []).length,
+    page: Math.floor(from / perPage) + 1,
+    per_page: perPage,
+  });
+});
+
+// Busca um cliente específico
+router.get('/:id', async (req, res) => {
+  const { id } = req.params;
   const { data, error } = await supabase
     .from('clientes')
     .select('*, cliente_tags(tags(id, nome, cor))')
-    .order('nome');
+    .eq('id', id)
+    .maybeSingle();
 
   if (error) return res.status(500).json({ error: error.message });
-  // Achata cliente_tags(tags(...)) pra um array simples `tags: [{id,nome,cor}]`
-  // -- fica mais fácil pro front não precisar saber da tabela de junção.
-  const comTagsAchatadas = (data || []).map(({ cliente_tags, ...c }) => ({
-    ...c,
-    tags: (cliente_tags || []).map((ct) => ct.tags).filter(Boolean),
-  }));
-  res.json(comTagsAchatadas);
+  if (!data) return res.status(404).json({ error: 'Cliente não encontrado' });
+  res.json(achatarTags(data));
 });
 
 // Cria cliente (sem PDF ainda)
@@ -43,8 +80,6 @@ router.post('/', async (req, res) => {
 
   // aceita "150,00" (padrão BR) além de "150.00" -- coluna no banco é numérica e rejeita vírgula
   const valorNormalizado = valor ? String(valor).trim().replace(',', '.') : null;
-  // normaliza pra dígitos + código do país -- garante que o unique index em `telefone`
-  // realmente evita duplicar o mesmo cliente cadastrado com formatações diferentes
   const telefoneNormalizado = normalizarTelefone(telefone);
   if (!telefoneNormalizado) {
     return res.status(400).json({ error: 'telefone inválido' });
@@ -57,7 +92,7 @@ router.post('/', async (req, res) => {
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
-  res.status(201).json(data);
+  res.status(201).json({ ...data, tags: [] });
 });
 
 // Upload/associação do PDF da fatura a um cliente
@@ -69,29 +104,25 @@ router.post('/:id/pdf', upload.single('pdf'), async (req, res) => {
 
   const { error: uploadError } = await supabase.storage
     .from(BUCKET)
-    .upload(caminho, req.file.buffer, {
-      contentType: 'application/pdf',
-      upsert: true,
-    });
+    .upload(caminho, req.file.buffer, { contentType: 'application/pdf', upsert: true });
 
   if (uploadError) return res.status(500).json({ error: uploadError.message });
 
   const { data: publicUrlData } = supabase.storage.from(BUCKET).getPublicUrl(caminho);
 
   // Tenta achar um QR code Pix na fatura e já deixa salvo/atribuído ao cliente --
-  // se não achar (fatura sem Pix, ou QR ilegível), pix_code fica null sem quebrar
-  // o upload em si.
+  // se não achar, pix_code fica null sem quebrar o upload em si.
   const pixCode = await extrairPixDoPdf(req.file.buffer);
 
   const { data, error } = await supabase
     .from('clientes')
     .update({ pdf_url: publicUrlData.publicUrl, pdf_path: caminho, pix_code: pixCode })
     .eq('id', id)
-    .select()
+    .select('*, cliente_tags(tags(id, nome, cor))')
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  res.json(achatarTags(data));
 });
 
 // Atualiza cliente
@@ -114,20 +145,20 @@ router.put('/:id', async (req, res) => {
       vencimento,
     })
     .eq('id', id)
-    .select()
+    .select('*, cliente_tags(tags(id, nome, cor))')
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  res.json(achatarTags(data));
 });
 
-// Histórico de envios de um cliente específico (todas as faturas/mensagens já enviadas a ele)
+// Histórico de envios de um cliente específico
 router.get('/:id/historico', async (req, res) => {
   const { id } = req.params;
 
   const { data, error } = await supabase
     .from('envio_itens')
-    .select('*, envios(template_mensagem, created_at)')
+    .select('id, status, status_entrega, erro, slot, enviado_em, created_at, envios(template_mensagem, created_at)')
     .eq('cliente_id', id)
     .order('created_at', { ascending: false });
 
@@ -135,23 +166,17 @@ router.get('/:id/historico', async (req, res) => {
   res.json(data);
 });
 
-// Remove cliente (e o PDF associado no Storage, se houver, pra não deixar lixo no bucket)
+// Remove cliente (e o PDF associado no Storage, se houver)
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
 
-  const { data: cliente } = await supabase
-    .from('clientes')
-    .select('pdf_path')
-    .eq('id', id)
-    .maybeSingle();
+  const { data: cliente } = await supabase.from('clientes').select('pdf_path').eq('id', id).maybeSingle();
 
   const { error } = await supabase.from('clientes').delete().eq('id', id);
   if (error) return res.status(500).json({ error: error.message });
 
   if (cliente?.pdf_path) {
     const { error: storageError } = await supabase.storage.from(BUCKET).remove([cliente.pdf_path]);
-    // não falha a requisição por isso -- o cliente já foi removido do banco, que é o que importa
-    // pro usuário; loga só pra investigação manual se sobrar arquivo órfão no bucket
     if (storageError) console.error('[clientes] erro ao remover pdf do storage:', storageError.message);
   }
 

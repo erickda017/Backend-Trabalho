@@ -13,6 +13,10 @@ import importacaoRoutes from './routes/importacao.routes.js';
 import chatRoutes from './routes/chat.routes.js';
 import tagsRoutes from './routes/tags.routes.js';
 import respostasRapidasRoutes from './routes/respostasRapidas.routes.js';
+import dashboardRoutes from './routes/dashboard.routes.js';
+import configuracoesRoutes from './routes/configuracoes.routes.js';
+import pixRoutes from './routes/pix.routes.js';
+import faturasRoutes from './routes/faturas.routes.js';
 
 dotenv.config();
 
@@ -57,6 +61,10 @@ app.use('/api/importacao', requireAuth, importacaoRoutes);
 app.use('/api/chat', requireAuth, chatRoutes);
 app.use('/api/tags', requireAuth, tagsRoutes);
 app.use('/api/respostas-rapidas', requireAuth, respostasRapidasRoutes);
+app.use('/api/dashboard', requireAuth, dashboardRoutes);
+app.use('/api/configuracoes', requireAuth, configuracoesRoutes);
+app.use('/api/pix', requireAuth, pixRoutes);
+app.use('/api/faturas', requireAuth, faturasRoutes);
 
 // Handler de erro global -- sem isso, erros como multer (arquivo grande demais, tipo
 // errado) ou qualquer exceção síncrona em uma rota caem no handler padrão do Express,

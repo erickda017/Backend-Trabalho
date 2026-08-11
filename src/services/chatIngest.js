@@ -79,7 +79,7 @@ async function baixarEGuardarMidia(sock, waMessage, { mediaMsg, mimetype, fileNa
 
 // Acha a conversa pelo telefone (cria se não existir) e atualiza os campos de resumo
 // (nome, última mensagem, contador de não lidas). Retorna a linha da conversa.
-async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quandoIso }) {
+async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quandoIso, slot }) {
   const { data: existente } = await supabase
     .from('conversas')
     .select('*')
@@ -109,6 +109,7 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
         nao_lidas: fromMe ? 0 : 1,
         ultima_mensagem: resumo,
         ultima_mensagem_em: quandoIso,
+        slot: slot || null,
       })
       .select()
       .single();
@@ -137,6 +138,7 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
     .update({
       nome_contato: nomeParaSalvar,
       nao_lidas: fromMe ? existente.nao_lidas : existente.nao_lidas + 1,
+      ...(slot ? { slot } : {}),
       ...(ehMaisNova ? { ultima_mensagem: resumo, ultima_mensagem_em: quandoIso } : {}),
     })
     .eq('id', existente.id)
@@ -146,7 +148,7 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
   return data;
 }
 
-async function processarMensagem(sock, waMessage) {
+async function processarMensagem(sock, waMessage, slot) {
   const key = waMessage.key;
   const remoteJid = key?.remoteJid;
   const messageId = key?.id;
@@ -195,6 +197,7 @@ async function processarMensagem(sock, waMessage) {
     tipo: interpretado.tipo,
     fromMe,
     quandoIso,
+    slot,
   });
 
   const { error } = await supabase
@@ -209,6 +212,7 @@ async function processarMensagem(sock, waMessage) {
         anexo_nome: anexoNome,
         message_id: messageId,
         created_at: quandoIso,
+        slot: slot || null,
       },
       { onConflict: 'message_id', ignoreDuplicates: true }
     );
@@ -219,9 +223,9 @@ async function processarMensagem(sock, waMessage) {
 // e/ou anexo), sem precisar rebaixar mídia -- já temos o anexo em mãos.
 // Quando o eco dessa mesma mensagem chegar pelo messages.upsert (fromMe: true), o
 // upsert por message_id (ignoreDuplicates) evita duplicar.
-export async function registrarMensagemSaida({ telefone, texto, tipo, anexoUrl, anexoNome, messageId }) {
+export async function registrarMensagemSaida({ telefone, texto, tipo, anexoUrl, anexoNome, messageId, slot }) {
   const quandoIso = new Date().toISOString();
-  const conversa = await upsertConversa({ telefone, nomeContato: null, texto, tipo, fromMe: true, quandoIso });
+  const conversa = await upsertConversa({ telefone, nomeContato: null, texto, tipo, fromMe: true, quandoIso, slot });
 
   const { data, error } = await supabase
     .from('mensagens')
@@ -236,6 +240,7 @@ export async function registrarMensagemSaida({ telefone, texto, tipo, anexoUrl, 
         message_id: messageId,
         status_entrega: 'enviado',
         created_at: quandoIso,
+        slot: slot || null,
       },
       { onConflict: 'message_id', ignoreDuplicates: true }
     )
@@ -245,16 +250,16 @@ export async function registrarMensagemSaida({ telefone, texto, tipo, anexoUrl, 
   return { conversa, mensagem: data };
 }
 
-export async function registrarMensagensRecebidas(sock, messages) {
+export async function registrarMensagensRecebidas(sock, messages, slot) {
   for (const m of messages) {
-    await processarMensagem(sock, m);
+    await processarMensagem(sock, m, slot);
   }
 }
 
-export async function registrarHistoricoInicial(sock, messages) {
+export async function registrarHistoricoInicial(sock, messages, slot) {
   // Processa em ordem cronológica pra "última mensagem" da conversa ficar coerente.
   const ordenadas = [...messages].sort((a, b) => Number(a.messageTimestamp || 0) - Number(b.messageTimestamp || 0));
   for (const m of ordenadas) {
-    await processarMensagem(sock, m);
+    await processarMensagem(sock, m, slot);
   }
 }

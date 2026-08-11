@@ -1,32 +1,86 @@
-import makeWASocket, { DisconnectReason, downloadMediaMessage } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import QRCode from 'qrcode';
-import { supabase, BUCKET } from '../lib/supabase.js';
+import { supabase } from '../lib/supabase.js';
 import { useSupabaseAuthState } from '../lib/supabaseAuthState.js';
 import { dispararWebhook } from './webhook.js';
 import { normalizarTelefone, formatJid } from '../lib/telefone.js';
 import { registrarMensagensRecebidas, registrarHistoricoInicial } from './chatIngest.js';
 
-// Identificador da sessão dentro da tabela whatsapp_sessions (permite, no futuro,
-// rodar mais de um número/instância trocando essa env var).
-const SESSION_ID = process.env.WHATSAPP_SESSION_ID || 'default';
-
-let sock = null;
-let lastQr = null;
-let connectionStatus = 'disconnected'; // disconnected | connecting | qr | connected
-let clearAuthState = null; // função pra apagar a sessão salva no Supabase (setada no startWhatsApp)
+export const SLOTS = [1, 2];
 
 const logger = pino({ level: 'silent' });
 
 // Baileys manda status como número: 0=pendente 1=enviado(servidor) 2=entregue(dispositivo) 3=lido 4=reproduzido(audio)
 const STATUS_MAP = { 2: 'entregue', 3: 'lido', 4: 'lido' };
 
-export async function startWhatsApp() {
-  const { state, saveCreds, clearState } = await useSupabaseAuthState(SESSION_ID);
-  clearAuthState = clearState;
+// Estado de cada sessão (chave = slot: 1 | 2). Antes era um único conjunto de
+// variáveis de módulo (sock/lastQr/connectionStatus); agora o front opera com
+// duas sessões WhatsApp independentes (ver README_CLAUDE_BACKEND.md, seção 2),
+// então tudo vira um Map indexado por slot.
+const sessoes = new Map();
 
-  sock = makeWASocket({
+function sessionIdDoSlot(slot) {
+  // Compatível com sessões antigas de antes do multi-slot: se WHATSAPP_SESSION_ID
+  // estiver setado e for o slot 1, reaproveita a sessão já pareada em vez de pedir
+  // um QR novo.
+  if (slot === 1 && process.env.WHATSAPP_SESSION_ID) return process.env.WHATSAPP_SESSION_ID;
+  return `slot-${slot}`;
+}
+
+function estadoInicial(slot) {
+  return {
+    slot,
+    sock: null,
+    lastQr: null,
+    status: 'disconnected', // disconnected | connecting | qr | connected
+    telefone: null,
+    nome: null,
+    ultimaConexao: null,
+    mensagensEnviadas: 0,
+    configurada: false, // true assim que já pareou alguma vez (tem creds salvas)
+    clearAuthState: null,
+  };
+}
+
+function getEstado(slot) {
+  if (!sessoes.has(slot)) sessoes.set(slot, estadoInicial(slot));
+  return sessoes.get(slot);
+}
+
+// Sobe as sessões que já têm credenciais salvas (pareadas anteriormente) --
+// chamado uma vez na subida do servidor. Slots nunca pareados ficam parados até
+// o usuário clicar em "conectar" na tela, e não geram QR sozinhos no boot.
+export async function startWhatsApp() {
+  for (const slot of SLOTS) {
+    const sessionId = sessionIdDoSlot(slot);
+    const { data } = await supabase
+      .from('whatsapp_sessions')
+      .select('session_id')
+      .eq('session_id', sessionId)
+      .eq('key', 'creds')
+      .maybeSingle();
+
+    const estado = getEstado(slot);
+    estado.configurada = Boolean(data);
+    if (data) await conectarSlot(slot);
+  }
+}
+
+export async function conectarSlot(slot) {
+  if (!SLOTS.includes(slot)) throw new Error('slot inválido (use 1 ou 2)');
+
+  const estado = getEstado(slot);
+  if (estado.status === 'connecting' || estado.status === 'connected') return getStatusSlot(slot);
+
+  estado.status = 'connecting';
+  const sessionId = sessionIdDoSlot(slot);
+
+  const { state, saveCreds, clearState } = await useSupabaseAuthState(sessionId);
+  estado.clearAuthState = clearState;
+
+  const sock = makeWASocket({
     auth: state,
     logger,
     printQRInTerminal: false,
@@ -36,6 +90,7 @@ export async function startWhatsApp() {
     // "consertar" uma promise que não é nossa.
     defaultQueryTimeoutMs: 120_000,
   });
+  estado.sock = sock;
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -43,23 +98,27 @@ export async function startWhatsApp() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      lastQr = await QRCode.toDataURL(qr);
-      connectionStatus = 'qr';
+      estado.lastQr = await QRCode.toDataURL(qr);
+      estado.status = 'qr';
     }
 
     if (connection === 'open') {
-      connectionStatus = 'connected';
-      lastQr = null;
-      console.log('[whatsapp] conectado');
+      estado.status = 'connected';
+      estado.lastQr = null;
+      estado.configurada = true;
+      estado.telefone = normalizarTelefone(sock.user?.id?.split(':')[0] || sock.user?.id || '') || null;
+      estado.nome = sock.user?.name || sock.user?.notify || null;
+      estado.ultimaConexao = new Date().toISOString();
+      console.log(`[whatsapp] slot ${slot} conectado`);
     }
 
     if (connection === 'close') {
-      connectionStatus = 'disconnected';
+      estado.status = 'disconnected';
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log('[whatsapp] conexão fechada. Reconectar?', shouldReconnect);
+      console.log(`[whatsapp] slot ${slot} conexão fechada. Reconectar?`, shouldReconnect);
       if (shouldReconnect) {
-        startWhatsApp();
+        conectarSlot(slot).catch((err) => console.error(`[whatsapp] erro ao reconectar slot ${slot}:`, err.message));
       }
     }
   });
@@ -101,7 +160,7 @@ export async function startWhatsApp() {
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return; // 'notify' = mensagem nova chegando agora (ignora replays de sincronização, tratados abaixo)
     try {
-      await registrarMensagensRecebidas(sock, messages);
+      await registrarMensagensRecebidas(sock, messages, slot);
     } catch (err) {
       console.error('[whatsapp] erro ao registrar mensagens recebidas:', err.message);
     }
@@ -109,52 +168,99 @@ export async function startWhatsApp() {
 
   // Só acontece uma vez, logo após escanear um QR novo: o WhatsApp manda um lote
   // (parcial, sem garantia de completude) do histórico recente de conversas.
-  // Tentamos aproveitar esse lote pra popular o chat com mensagens anteriores à
-  // conexão -- bônus, não é uma fonte confiável de histórico completo.
   sock.ev.on('messaging-history.set', async ({ messages }) => {
     try {
-      await registrarHistoricoInicial(sock, messages);
+      await registrarHistoricoInicial(sock, messages, slot);
     } catch (err) {
       console.error('[whatsapp] erro ao registrar histórico inicial:', err.message);
     }
   });
 
-  return sock;
+  return getStatusSlot(slot);
 }
 
+export function getStatusSlot(slot) {
+  const e = getEstado(slot);
+  return {
+    slot,
+    configurada: e.configurada,
+    status: e.status,
+    qr: e.lastQr,
+    telefone: e.telefone,
+    nome: e.nome,
+    ultima_conexao: e.ultimaConexao,
+    mensagens_enviadas: e.mensagensEnviadas,
+  };
+}
+
+export function listarConexoes() {
+  return SLOTS.map((slot) => getStatusSlot(slot));
+}
+
+// Status agregado -- compatibilidade com a versão de conexão única (usado por
+// GET /whatsapp/status). "Conectado" se pelo menos um slot estiver conectado.
 export function getStatus() {
-  return { status: connectionStatus, qr: lastQr };
+  const conexoes = listarConexoes();
+  const conectada = conexoes.find((c) => c.status === 'connected');
+  if (conectada) return { status: 'connected', qr: null };
+  const emQr = conexoes.find((c) => c.status === 'qr');
+  if (emQr) return { status: 'qr', qr: emQr.qr };
+  const conectando = conexoes.find((c) => c.status === 'connecting');
+  if (conectando) return { status: 'connecting', qr: null };
+  return { status: 'disconnected', qr: null };
 }
 
-export function getSocket() {
-  if (!sock) throw new Error('WhatsApp não inicializado ainda');
-  return sock;
+export function getSocket(slot) {
+  const s = slotConectado(slot);
+  const e = getEstado(s);
+  if (!e.sock) throw new Error(`WhatsApp (slot ${s}) não inicializado ainda`);
+  return e.sock;
 }
 
-export function isConnected() {
-  return connectionStatus === 'connected';
+export function isConnected(slot) {
+  if (slot) return getEstado(slot).status === 'connected';
+  return SLOTS.some((s) => getEstado(s).status === 'connected');
 }
 
-export async function logoutWhatsApp() {
-  if (sock) {
-    await sock.logout();
-    sock = null;
-    connectionStatus = 'disconnected';
+export function slotsConectados() {
+  return SLOTS.filter((s) => getEstado(s).status === 'connected');
+}
+
+// Resolve qual slot usar de fato quando quem chamou não exigiu um slot específico
+// -- usa o primeiro conectado. Lança erro claro se nenhum estiver disponível.
+function slotConectado(slot) {
+  if (slot && getEstado(slot).status === 'connected') return slot;
+  const conectados = slotsConectados();
+  if (conectados.length) return conectados[0];
+  throw new Error('Nenhuma conexão WhatsApp disponível (nenhum slot conectado)');
+}
+
+export async function logoutSlot(slot) {
+  const e = getEstado(slot);
+  if (e.sock) {
+    try {
+      await e.sock.logout();
+    } catch (err) {
+      console.error(`[whatsapp] erro ao encerrar sessão do slot ${slot}:`, err.message);
+    }
+    e.sock = null;
   }
-  // Apaga a sessão salva no Supabase (linhas da whatsapp_sessions), no lugar do
-  // antigo fs.rmSync no diretório em disco.
-  if (clearAuthState) await clearAuthState();
+  if (e.clearAuthState) await e.clearAuthState();
 
-  // Depois de um logout explícito, o Baileys NÃO reconecta sozinho (é o comportamento
-  // esperado dele: statusCode 'loggedOut' desativa o auto-reconnect em connection.update).
-  // Sem essa chamada, o sistema ficaria sem gerar um QR Code novo até reiniciar o servidor.
-  await startWhatsApp();
+  sessoes.set(slot, estadoInicial(slot));
+  return getStatusSlot(slot);
+}
+
+// Compatibilidade legada (POST /whatsapp/logout): encerra todas as sessões.
+export async function logoutWhatsApp() {
+  for (const slot of SLOTS) {
+    if (getEstado(slot).status !== 'disconnected') await logoutSlot(slot);
+  }
 }
 
 // Verifica se o número existe no WhatsApp antes de tentar enviar.
-// Retorna { existe: boolean, jid: string } -- jid pode vir com formatação diferente (o real da conta).
-export async function validarNumero(numero) {
-  const socket = getSocket();
+export async function validarNumero(numero, slot) {
+  const socket = getSocket(slot);
   const comCodigoPais = normalizarTelefone(numero);
 
   const [resultado] = await socket.onWhatsApp(comCodigoPais);
@@ -163,12 +269,10 @@ export async function validarNumero(numero) {
 
 // IMPORTANTE: `jid` deve vir de validarNumero() sempre que possível -- é o JID
 // REAL confirmado pelo WhatsApp via onWhatsApp(), que pode divergir do que
-// formatJid(numero) monta na mão (ex: número antigo registrado sem o 9º dígito).
-// Mandar pro JID "adivinhado" em vez do JID validado é o motivo clássico de a
-// mensagem sair como "enviada" no Baileys (sem erro) e nunca chegar de verdade
-// no aparelho: o socket aceita o envio, mas o destino não existe como tal.
-export async function enviarMensagemComPdf({ numero, jid, mensagem, pdfUrl, pdfNome }) {
-  const socket = getSocket();
+// formatJid(numero) monta na mão.
+export async function enviarMensagemComPdf({ numero, jid, mensagem, pdfUrl, pdfNome, slot }) {
+  const usado = slotConectado(slot);
+  const socket = getSocket(usado);
   const destino = jid || formatJid(numero);
 
   const enviada = await socket.sendMessage(destino, {
@@ -178,22 +282,23 @@ export async function enviarMensagemComPdf({ numero, jid, mensagem, pdfUrl, pdfN
     caption: mensagem,
   });
 
-  return { messageId: enviada?.key?.id || null };
+  getEstado(usado).mensagensEnviadas += 1;
+  return { messageId: enviada?.key?.id || null, slot: usado };
 }
 
-export async function enviarMensagemTexto({ numero, jid, mensagem }) {
-  const socket = getSocket();
+export async function enviarMensagemTexto({ numero, jid, mensagem, slot }) {
+  const usado = slotConectado(slot);
+  const socket = getSocket(usado);
   const destino = jid || formatJid(numero);
   const enviada = await socket.sendMessage(destino, { text: mensagem });
-  return { messageId: enviada?.key?.id || null };
+  getEstado(usado).mensagensEnviadas += 1;
+  return { messageId: enviada?.key?.id || null, slot: usado };
 }
 
-// Envio genérico usado pelo Chat (resposta ao cliente) -- diferente do
-// enviarMensagemComPdf, aqui o anexo pode ser imagem, áudio ou documento qualquer,
-// e o texto é opcional (pode mandar só o anexo, ou só texto).
-// `jid` deve vir de validarNumero() -- mesma regra de enviarMensagemComPdf/Texto acima.
-export async function enviarMensagemComAnexo({ numero, jid, mensagem, anexoUrl, anexoNome, anexoTipo, anexoMimetype }) {
-  const socket = getSocket();
+// Envio genérico usado pelo Chat (resposta ao cliente).
+export async function enviarMensagemComAnexo({ numero, jid, mensagem, anexoUrl, anexoNome, anexoTipo, anexoMimetype, slot }) {
+  const usado = slotConectado(slot);
+  const socket = getSocket(usado);
   const destino = jid || formatJid(numero);
 
   let payload;
@@ -213,5 +318,6 @@ export async function enviarMensagemComAnexo({ numero, jid, mensagem, anexoUrl, 
   }
 
   const enviada = await socket.sendMessage(destino, payload);
-  return { messageId: enviada?.key?.id || null };
+  getEstado(usado).mensagensEnviadas += 1;
+  return { messageId: enviada?.key?.id || null, slot: usado };
 }

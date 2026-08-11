@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase.js';
 import { enviarMensagemComPdf, enviarMensagemTexto, validarNumero } from './whatsapp.js';
+import { escolherSlot } from '../lib/estrategia.js';
 import { dispararWebhook } from './webhook.js';
 import { registrarMensagemSaida } from './chatIngest.js';
 
@@ -17,11 +18,6 @@ let isRunning = false;
 let contadorLote = 0;
 
 // Brasil não observa horário de verão desde 2019 -- offset fixo -03:00.
-// IMPORTANTE: o servidor (Render) roda em UTC, não no horário de Brasília. Usar
-// `new Date(); setHours(0,0,0,0)` (como antes) calcula a "meia-noite" em UTC, que
-// corresponde às 21h em Brasília -- isso reiniciava o limite diário 3h mais cedo
-// do que o esperado. Por isso o "início do dia" é calculado explicitamente no
-// fuso de São Paulo aqui, independente do fuso do servidor.
 const OFFSET_BR = '-03:00';
 
 function inicioDoDiaBR(data = new Date()) {
@@ -34,17 +30,21 @@ function inicioDoDiaBR(data = new Date()) {
   return new Date(`${dataSP}T00:00:00${OFFSET_BR}`);
 }
 
-function delayAleatorio() {
-  const ms = Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY + 1)) + MIN_DELAY;
+// Intervalo entre mensagens: usa intervalo_ms do envio (fixo) quando informado,
+// senão cai no range aleatório MIN_DELAY..MAX_DELAY (comportamento anterior).
+function delayEntreMensagens(intervaloMs) {
+  const ms = intervaloMs > 0 ? intervaloMs : Math.floor(Math.random() * (MAX_DELAY - MIN_DELAY + 1)) + MIN_DELAY;
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function montarMensagem(template, cliente) {
   const valorNumerico = cliente.valor != null ? Number(String(cliente.valor).replace(',', '.')) : null;
-  return template
+  return (template || '')
     .replaceAll('{{nome}}', cliente.nome || '')
+    .replaceAll('{{telefone}}', cliente.telefone || '')
     .replaceAll('{{valor}}', valorNumerico && !Number.isNaN(valorNumerico) ? `R$ ${valorNumerico.toFixed(2)}` : '')
-    .replaceAll('{{vencimento}}', cliente.vencimento || '');
+    .replaceAll('{{vencimento}}', cliente.vencimento || '')
+    .replaceAll('{{pix}}', cliente.pix_code || '');
 }
 
 // Conta quantas mensagens já foram enviadas hoje (considerando todos os envios)
@@ -72,32 +72,39 @@ async function enviarItem(item, envio) {
   const templateDoItem = item.mensagem_override || envio.template_mensagem;
   const mensagem = montarMensagem(templateDoItem, cliente);
 
-  // valida se o número existe no WhatsApp antes de gastar tempo/risco enviando.
-  // Também dentro do try/catch: se a validação falhar (ex: conexão caiu no meio do
-  // disparo), o item vira 'erro' (retry-ável) em vez de derrubar o lote inteiro.
+  // Escolhe o slot pra ESTA mensagem: slot fixo do envio, ou a estratégia
+  // configurada (round_robin alterna mensagem a mensagem entre os conectados).
+  let slotEscolhido;
   try {
-    const { existe, jid } = await validarNumero(cliente.telefone);
+    slotEscolhido = await escolherSlot(envio.slot);
+  } catch (err) {
+    await supabase.from('envio_itens').update({ status: 'erro', erro: err.message }).eq('id', item.id);
+    await dispararWebhook('erro_envio', { cliente, envio_id: envio.id, erro: err.message });
+    return;
+  }
+
+  try {
+    const { existe, jid } = await validarNumero(cliente.telefone, slotEscolhido);
     if (!existe) {
       await supabase
         .from('envio_itens')
-        .update({ status: 'numero_invalido', erro: 'Número não encontrado no WhatsApp' })
+        .update({ status: 'numero_invalido', erro: 'Número não encontrado no WhatsApp', slot: slotEscolhido })
         .eq('id', item.id);
 
       await dispararWebhook('numero_invalido', { cliente, envio_id: envio.id });
       return;
     }
 
-    // Usa o `jid` já validado acima (o real, confirmado pelo WhatsApp) em vez de
-    // deixar enviarMensagem* remontar o número na mão -- ver comentário em whatsapp.js.
-    const { messageId } = cliente.pdf_url
+    const { messageId, slot: slotUsado } = cliente.pdf_url
       ? await enviarMensagemComPdf({
           numero: cliente.telefone,
           jid,
           mensagem,
           pdfUrl: cliente.pdf_url,
           pdfNome: `fatura-${cliente.nome}.pdf`,
+          slot: slotEscolhido,
         })
-      : await enviarMensagemTexto({ numero: cliente.telefone, jid, mensagem });
+      : await enviarMensagemTexto({ numero: cliente.telefone, jid, mensagem, slot: slotEscolhido });
 
     await supabase
       .from('envio_itens')
@@ -107,6 +114,7 @@ async function enviarItem(item, envio) {
         message_id: messageId,
         status_entrega: 'enviado',
         enviado_em: new Date().toISOString(),
+        slot: slotUsado,
       })
       .eq('id', item.id);
 
@@ -121,27 +129,25 @@ async function enviarItem(item, envio) {
         anexoUrl: cliente.pdf_url || null,
         anexoNome: cliente.pdf_url ? `fatura-${cliente.nome}.pdf` : null,
         messageId,
+        slot: slotUsado,
       });
     } catch (chatErr) {
-      // Erro ao gravar no chat não pode derrubar o disparo em si -- a mensagem já
-      // foi enviada de verdade pro WhatsApp, isso é só o espelho no histórico.
       console.error(`[dispatch] erro ao registrar no chat para ${cliente.nome}:`, chatErr.message);
     }
 
-    await dispararWebhook('mensagem_enviada', { cliente, envio_id: envio.id, message_id: messageId });
+    await dispararWebhook('mensagem_enviada', { cliente, envio_id: envio.id, message_id: messageId, slot: slotUsado });
   } catch (err) {
     console.error(`[dispatch] erro ao enviar para ${cliente.nome}:`, err.message);
     await supabase
       .from('envio_itens')
-      .update({ status: 'erro', erro: err.message })
+      .update({ status: 'erro', erro: err.message, slot: slotEscolhido })
       .eq('id', item.id);
 
     await dispararWebhook('erro_envio', { cliente, envio_id: envio.id, erro: err.message });
   }
 }
 
-// Processa um disparo em lote: pega itens 'pendente' de um envio_id e dispara um a um,
-// respeitando delay aleatório, limite diário e pausa longa a cada lote.
+// Processa um disparo em lote: pega itens 'pendente' de um envio_id e dispara um a um.
 export async function processarDisparo(envioId) {
   if (isRunning) {
     throw new Error('Já existe um disparo em andamento. Aguarde finalizar.');
@@ -196,16 +202,10 @@ export async function processarDisparo(envioId) {
           console.log(`[dispatch] pausa longa após ${BATCH_SIZE} mensagens (${BATCH_PAUSE_MS / 1000}s)`);
           await new Promise((resolve) => setTimeout(resolve, BATCH_PAUSE_MS));
         } else {
-          await delayAleatorio();
+          await delayEntreMensagens(envio.intervalo_ms);
         }
       }
     } catch (err) {
-      // Qualquer erro inesperado aqui (ex: conexão do WhatsApp caiu no meio do disparo)
-      // NUNCA deve deixar o envio travado em 'em_andamento' pra sempre -- isso deixaria
-      // o usuário sem conseguir retomar ou reenviar pela interface. Marca como pausado
-      // com o erro registrado; os itens que ainda estão 'pendente' podem ser retomados
-      // depois (basta clicar em disparar de novo, ou o scheduler não mexe nesse caso
-      // porque não há retomar_em -- fica visível como pausado até ação manual).
       console.error(`[dispatch] erro inesperado no disparo ${envioId}, pausando:`, err.message);
       await supabase
         .from('envios')
@@ -245,12 +245,8 @@ export function disparoEmAndamento() {
 }
 
 // Roda uma vez na inicialização do servidor. Se o processo morreu (crash, redeploy)
-// no meio de um disparo, o envio fica marcado 'em_andamento' no banco pra sempre,
-// já que `isRunning` (em memória) reseta pra false ao reiniciar, mas nada nunca
-// avisa o banco disso. Sem essa recuperação, o envio ficaria travado na tela de
-// progresso pra sempre, sem nenhum jeito de retomar pela interface.
-// É seguro voltar pra 'pendente': o dispatch só processa itens ainda 'pendente',
-// então nada é reenviado em duplicidade.
+// no meio de um disparo, o envio fica marcado 'em_andamento' no banco pra sempre.
+// É seguro voltar pra 'pendente': o dispatch só processa itens ainda 'pendente'.
 export async function recuperarEnviosTravados() {
   const { data, error } = await supabase
     .from('envios')

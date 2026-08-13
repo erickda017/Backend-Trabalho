@@ -3,6 +3,7 @@ import multer from 'multer';
 import XLSX from 'xlsx';
 import { processarImportacao, processarImportacaoLotePronto } from '../services/importLote.js';
 import { normalizarTelefone } from '../lib/telefone.js';
+import { supabase, BUCKET } from '../lib/supabase.js';
 
 const router = Router();
 // Multer com memoryStorage guarda o arquivo INTEIRO na RAM do processo (o mesmo
@@ -37,6 +38,45 @@ const upload = multer({
 
 const MENSAGEM_PADRAO =
   'Olá {{nome}}, tudo bem? Segue em anexo sua fatura no valor de {{valor}}, com vencimento em {{vencimento}}. Qualquer dúvida estou à disposição!';
+
+// Multer só pra 1 PDF por vez (repasse pro Storage) -- nada a ver com o multer
+// acima (que é pro fluxo antigo com zip+planilha inteiros). 15MB cobre boleto
+// tranquilo; se algum PDF passar disso o problema é o PDF, não o limite.
+const uploadPdfUnico = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+});
+
+// Repasse de 1 PDF pro Storage usando a service_role key (ignora RLS).
+// Existe porque o upload direto do navegador (anon/authenticated key, sujeito a
+// RLS) está bloqueado nesse projeto Supabase por uma causa que não é do código
+// (bucket/policy/grant conferem, Postgres nega mesmo assim -- ver conversa/
+// investigação). Isso NÃO reintroduz o problema de RAM que a migration-5 tentava
+// evitar: o navegador continua fazendo o trabalho pesado (render do PDF em
+// canvas + leitura de QR pra achar o Pix, em pixFromPdfBrowser.ts) -- aqui só
+// passa os bytes já prontos, sem processar nada.
+router.post('/upload-pdf', uploadPdfUnico.single('pdf'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
+    const caminho = req.body?.caminho;
+    if (!caminho || typeof caminho !== 'string') {
+      return res.status(400).json({ error: 'campo "caminho" é obrigatório' });
+    }
+
+    const { error: uploadError } = await supabase.storage
+      .from(BUCKET)
+      .upload(caminho, req.file.buffer, { contentType: 'application/pdf', upsert: true });
+
+    if (uploadError) return res.status(500).json({ error: uploadError.message });
+
+    const { data: publicUrlData } = supabase.storage.from(BUCKET).getPublicUrl(caminho);
+
+    res.status(201).json({ path: caminho, publicUrl: publicUrlData.publicUrl });
+  } catch (err) {
+    console.error('[importacao] erro no upload-pdf:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Wrapper em volta do middleware do multer -- erros de upload (arquivo grande
 // demais, tipo errado no fileFilter) acontecem DENTRO do parsing do

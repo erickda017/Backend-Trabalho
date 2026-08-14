@@ -14,7 +14,14 @@ function normalizar(str) {
 }
 
 function normalizarNomeArquivo(str) {
-  return normalizar(str).replace(/\.pdf$/i, '');
+  return normalizar(str)
+    .replace(/\.pdf$/i, '')
+    // trata hífen/underscore como espaço (slug "joao-silva" == nome "João Silva"),
+    // e colapsa espaços repetidos -- sem isso, planilha com "arquivo" em slug
+    // só casava quando o nome do PDF usava exatamente o mesmo separador.
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 // Aceita variações de nome de coluna (numero, número, telefone, whatsapp...)
@@ -108,7 +115,7 @@ const CONCORRENCIA_IMPORTACAO = Number(process.env.IMPORTACAO_CONCORRENCIA || 2)
 // pelos dois fluxos de importação (server-side com PDF binário, e client-side
 // já processado no navegador) -- a parte de "criar envio + itens" é idêntica
 // nos dois, só muda como cada linha chega até aqui.
-async function montarResumoECriarEnvio(totalLinhas, processadas, templateMensagemPadrao) {
+async function montarResumoECriarEnvio(totalLinhas, processadas, templateMensagemPadrao, lote = null) {
   const resultado = {
     total: totalLinhas,
     sucesso: [],
@@ -138,7 +145,7 @@ async function montarResumoECriarEnvio(totalLinhas, processadas, templateMensage
   // cria o lote de envio já com os itens prontos (status pendente, aguardando o clique de "Disparar")
   const { data: envio, error: envioError } = await supabase
     .from('envios')
-    .insert({ template_mensagem: templateMensagemPadrao, status: 'pendente' })
+    .insert({ template_mensagem: templateMensagemPadrao, status: 'pendente', lote: lote || null })
     .select()
     .single();
 
@@ -269,7 +276,7 @@ const CONCORRENCIA_UPSERT_LOTE = Number(process.env.IMPORTACAO_LOTE_CONCORRENCIA
 // tratado como 'semPdf', igual ao fluxo antigo)
 // `linhasSemDados` é o array de linhas que já vieram marcadas como inválidas
 // do navegador (sem numero/nome, ou telefone que não normalizou).
-export async function processarImportacaoLotePronto({ itensProntos, linhasSemDados, templateMensagemPadrao }) {
+export async function processarImportacaoLotePronto({ itensProntos, linhasSemDados, templateMensagemPadrao, lote }) {
   async function processarItem(item) {
     if (!item.pdf_url) {
       return { tipo: 'semPdf', linha: item };
@@ -312,5 +319,5 @@ export async function processarImportacaoLotePronto({ itensProntos, linhasSemDad
   const todasProcessadas = [...processadasSemDados, ...processadasItens];
   const totalLinhas = itensProntos.length + linhasSemDados.length;
 
-  return montarResumoECriarEnvio(totalLinhas, todasProcessadas, templateMensagemPadrao);
+  return montarResumoECriarEnvio(totalLinhas, todasProcessadas, templateMensagemPadrao, lote);
 }

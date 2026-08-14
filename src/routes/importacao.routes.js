@@ -55,7 +55,22 @@ const uploadPdfUnico = multer({
 // evitar: o navegador continua fazendo o trabalho pesado (render do PDF em
 // canvas + leitura de QR pra achar o Pix, em pixFromPdfBrowser.ts) -- aqui só
 // passa os bytes já prontos, sem processar nada.
-router.post('/upload-pdf', uploadPdfUnico.single('pdf'), async (req, res) => {
+// Wrapper igual ao uploadComTratamentoDeErro (linha ~88), só que pro upload de
+// 1 PDF avulso -- mesmo motivo: erro do multer (arquivo grande) não cai no
+// try/catch do handler, precisa ser pego aqui pra devolver 413 com mensagem
+// clara em vez do 500 genérico padrão do Express.
+function uploadPdfComTratamentoDeErro(req, res, next) {
+  uploadPdfUnico.single('pdf')(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'PDF muito grande (limite: 15MB por arquivo).' });
+    }
+    console.error('[importacao] erro no upload-pdf (multer):', err.message);
+    return res.status(400).json({ error: err.message || 'Erro ao processar o upload' });
+  });
+}
+
+router.post('/upload-pdf', uploadPdfComTratamentoDeErro, async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
     const caminho = req.body?.caminho;
@@ -169,7 +184,7 @@ function validarItemLote(item) {
 // pequeno (Render free, 512MB).
 router.post('/lote', async (req, res) => {
   try {
-    const { itens, mensagem } = req.body || {};
+    const { itens, mensagem, lote } = req.body || {};
 
     if (!Array.isArray(itens)) {
       return res.status(400).json({ error: 'Campo "itens" (array) é obrigatório' });
@@ -204,6 +219,7 @@ router.post('/lote', async (req, res) => {
       itensProntos,
       linhasSemDados,
       templateMensagemPadrao,
+      lote: typeof lote === 'string' ? lote.trim().slice(0, 120) || null : null,
     });
 
     res.status(201).json(resultado);

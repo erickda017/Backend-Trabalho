@@ -43,6 +43,7 @@ function montarEnvioResumo(envio, contadores) {
     lote: envio.lote || null,
     status: envio.status,
     slot: envio.slot ?? null,
+    janela_ms: envio.janela_ms ?? null,
     ...contadores,
   };
 }
@@ -110,10 +111,10 @@ router.post('/teste', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // Cria um novo envio (lote de disparo)
-// body: { mensagem, cliente_ids[], tag_ids[], intervalo_ms, agendado_para?, slot? }
+// body: { mensagem, cliente_ids[], tag_ids[], intervalo_ms, janela_ms, agendado_para?, slot? }
 // ---------------------------------------------------------------------------
 router.post('/', async (req, res) => {
-  const { mensagem, cliente_ids = [], tag_ids = [], intervalo_ms, agendado_para, slot } = req.body || {};
+  const { mensagem, cliente_ids = [], tag_ids = [], intervalo_ms, janela_ms, agendado_para, slot } = req.body || {};
 
   if (!mensagem) {
     return res.status(400).json({ error: 'mensagem é obrigatória' });
@@ -138,6 +139,7 @@ router.post('/', async (req, res) => {
       agendado_para: agendado_para || null,
       slot: slot || null,
       intervalo_ms: intervalo_ms || null,
+      janela_ms: janela_ms || null,
     })
     .select()
     .single();

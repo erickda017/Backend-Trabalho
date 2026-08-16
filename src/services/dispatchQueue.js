@@ -179,6 +179,16 @@ export async function processarDisparo(envioId) {
 
     if (itensError) throw itensError;
 
+    // Intervalo de disparo: se o envio tem uma janela de tempo total definida
+    // (envios.janela_ms), espalha os itens PENDENTES DESTA CHAMADA igualmente
+    // dentro dela -- primeira mensagem sai já, a última antes da janela fechar.
+    // Recalculado a cada chamada (novo disparo OU continuar um pausado), então
+    // se sobrarem 20 de 60 itens depois de retomar, os 20 restantes dividem a
+    // MESMA duração configurada, contada a partir de agora.
+    // Sem janela_ms definida, funciona exatamente como antes (sem restrição).
+    const delayDaJanela =
+      envio.janela_ms > 0 && itens.length > 0 ? Math.floor(envio.janela_ms / itens.length) : null;
+
     try {
       for (const item of itens) {
         // Sem isso: se o WhatsApp cair no meio do disparo (ex: celular sem internet,
@@ -229,7 +239,12 @@ export async function processarDisparo(envioId) {
         await enviarItem(item, envio);
         contadorLote++;
 
-        if (BATCH_SIZE > 0 && contadorLote % BATCH_SIZE === 0) {
+        if (delayDaJanela != null) {
+          // Janela de tempo ativa: ignora a pausa-longa por lote e o
+          // aleatório/fixo normal -- o espaçamento calculado já É a proteção
+          // contra queda do Zap, no ritmo que o próprio usuário definiu.
+          await new Promise((resolve) => setTimeout(resolve, delayDaJanela));
+        } else if (BATCH_SIZE > 0 && contadorLote % BATCH_SIZE === 0) {
           console.log(`[dispatch] pausa longa após ${BATCH_SIZE} mensagens (${BATCH_PAUSE_MS / 1000}s)`);
           await new Promise((resolve) => setTimeout(resolve, BATCH_PAUSE_MS));
         } else {

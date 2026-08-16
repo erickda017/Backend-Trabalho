@@ -41,6 +41,7 @@ function estadoInicial(slot) {
     mensagensEnviadas: 0,
     configurada: false, // true assim que já pareou alguma vez (tem creds salvas)
     clearAuthState: null,
+    desconectandoManual: false, // true durante um logoutSlot() em andamento -- evita a corrida abaixo
   };
 }
 
@@ -95,6 +96,12 @@ export async function conectarSlot(slot) {
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
+    // Guarda contra "sock fantasma": se enquanto essa sessão caía o usuário já
+    // clicou desconectar/conectar de novo, `estado.sock` já aponta pro socket
+    // NOVO (ou null) -- eventos chegando atrasados do socket ANTIGO não podem
+    // mais mexer no estado, senão sobrescrevem o que aconteceu depois.
+    if (estado.sock !== sock) return;
+
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -115,7 +122,11 @@ export async function conectarSlot(slot) {
     if (connection === 'close') {
       estado.status = 'disconnected';
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      // Se foi um logoutSlot() explícito (usuário clicou "Desconectar"), NUNCA
+      // reconecta sozinho -- antes disso não existia essa checagem, e o
+      // auto-reconnect abaixo podia vencer a corrida com o logout manual e
+      // religar a sessão segundos depois, dando a impressão de botão travado.
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !estado.desconectandoManual;
       console.log(`[whatsapp] slot ${slot} conexão fechada. Reconectar?`, shouldReconnect);
       if (shouldReconnect) {
         conectarSlot(slot).catch((err) => console.error(`[whatsapp] erro ao reconectar slot ${slot}:`, err.message));
@@ -237,13 +248,18 @@ function slotConectado(slot) {
 
 export async function logoutSlot(slot) {
   const e = getEstado(slot);
+  e.desconectandoManual = true;
   if (e.sock) {
+    const sockAntigo = e.sock;
+    // Zera a referência ANTES de chamar logout(): qualquer evento 'close' do
+    // socket antigo que ainda esteja em voo vê `estado.sock !== sock` (guarda
+    // acima) e não reconecta sozinho, mesmo se chegar atrasado.
+    e.sock = null;
     try {
-      await e.sock.logout();
+      await sockAntigo.logout();
     } catch (err) {
       console.error(`[whatsapp] erro ao encerrar sessão do slot ${slot}:`, err.message);
     }
-    e.sock = null;
   }
   if (e.clearAuthState) await e.clearAuthState();
 

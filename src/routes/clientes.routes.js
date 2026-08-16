@@ -5,6 +5,7 @@ import { normalizarTelefone } from '../lib/telefone.js';
 import { extrairPixDoPdf } from '../lib/pixFromPdf.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
+import { parseListaClientes } from '../lib/parseListaClientes.js';
 
 const router = Router();
 const upload = multer({
@@ -22,6 +23,64 @@ const upload = multer({
 function achatarTags({ cliente_tags, ...c }) {
   return { ...c, tags: (cliente_tags || []).map((ct) => ct.tags).filter(Boolean) };
 }
+
+// ---------------------------------------------------------------------------
+// Conversor de lista crua -- recebe o texto colado (formato NOME/contrato/CPF/
+// telefone(s)/Fatura/valor) e devolve as linhas já no layout da planilha modelo
+// (1 linha por telefone). Só faz o parse -- não grava nada no banco ainda,
+// pra dar chance de revisar antes de importar (ver POST /importar-lista).
+router.post('/converter-lista', (req, res) => {
+  const { texto } = req.body || {};
+  if (!texto || typeof texto !== 'string' || !texto.trim()) {
+    return res.status(400).json({ error: 'Cole o texto da lista de clientes no campo "texto"' });
+  }
+
+  const { itens, avisos } = parseListaClientes(texto);
+  res.json({ itens, avisos, total: itens.length });
+});
+
+// Importa direto os itens já convertidos/revisados (upsert por telefone --
+// mesmo comportamento do resto do sistema, não duplica cliente). Não grava
+// PDF nenhum aqui -- isso continua casando depois pelo fluxo normal de
+// Importar (zip + planilha), usando a coluna "arquivo" que esse conversor já
+// deixa pronta no mesmo padrão (slug do nome).
+router.post('/importar-lista', async (req, res) => {
+  const { itens } = req.body || {};
+  if (!Array.isArray(itens) || itens.length === 0) {
+    return res.status(400).json({ error: 'Campo "itens" (array) é obrigatório' });
+  }
+  if (itens.length > 1000) {
+    return res.status(413).json({ error: `Lote grande demais (${itens.length} linhas, limite 1000). Divida em partes menores.` });
+  }
+
+  const criados = [];
+  const erros = [];
+
+  for (const item of itens) {
+    const telefoneNormalizado = normalizarTelefone(item?.numero);
+    if (!item?.nome || !telefoneNormalizado) {
+      erros.push({ ...item, erro: 'nome ou telefone inválido' });
+      continue;
+    }
+
+    const { data, error } = await supabase
+      .from('clientes')
+      .upsert(
+        { nome: item.nome, telefone: telefoneNormalizado, valor: item.valor ?? null },
+        { onConflict: 'telefone' },
+      )
+      .select('id')
+      .single();
+
+    if (error) {
+      erros.push({ ...item, erro: error.message });
+      continue;
+    }
+    criados.push({ ...item, cliente_id: data.id });
+  }
+
+  res.status(201).json({ criados: criados.length, erros, total: itens.length });
+});
 
 // Lista clientes (paginado, com filtros busca/tag/com_pix/sem_pix)
 router.get('/', async (req, res) => {

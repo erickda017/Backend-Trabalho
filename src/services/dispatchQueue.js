@@ -238,12 +238,21 @@ export async function processarDisparo(envioId) {
       }
     } catch (err) {
       console.error(`[dispatch] erro inesperado no disparo ${envioId}, pausando:`, err.message);
+      // retomar_em precisa de um valor -- o scheduler só retoma envios 'pausado'
+      // com retomar_em <= agora; com null a comparação nunca bate e o lote fica
+      // travado pra sempre (só saía do 'pausado' com clique manual). Agora ele
+      // se autorecupera como os outros casos de pausa (sem conexão / limite diário).
+      const retomarEm = new Date(Date.now() + RECONEXAO_RETRY_MS);
       await supabase
         .from('envios')
-        .update({ status: 'pausado', retomar_em: null })
+        .update({ status: 'pausado', retomar_em: retomarEm.toISOString() })
         .eq('id', envioId);
 
-      await dispararWebhook('disparo_erro_inesperado', { envio_id: envioId, erro: err.message });
+      await dispararWebhook('disparo_erro_inesperado', {
+        envio_id: envioId,
+        erro: err.message,
+        retomar_em: retomarEm.toISOString(),
+      });
       return;
     }
 

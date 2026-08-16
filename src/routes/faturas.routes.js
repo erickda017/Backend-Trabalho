@@ -12,9 +12,11 @@ router.get('/', async (req, res) => {
   const { busca, com_pdf, sem_pdf } = req.query;
   const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
 
+  // Aliases explícitos: o frontend (/faturas) espera cliente_id/cliente_nome,
+  // não id/nome -- sem isso o nome do cliente vinha undefined em cada linha.
   let query = supabase
     .from('clientes')
-    .select('id, nome, telefone, valor, vencimento, pdf_url, pdf_path, pix_code', { count: 'exact' })
+    .select('id, cliente_id:id, cliente_nome:nome, telefone, valor, vencimento, pdf_url, pdf_path, pix_code', { count: 'exact' })
     .order('nome');
 
   if (busca) query = query.or(`nome.ilike.%${escaparFiltroPostgrest(busca)}%,telefone.ilike.%${escaparFiltroPostgrest(busca)}%`);

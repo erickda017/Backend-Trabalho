@@ -1,7 +1,16 @@
 import { Router } from 'express';
 import { configEstrategiaCompleta, salvarEstrategia } from '../lib/estrategia.js';
+import { configDisparo } from '../services/dispatchQueue.js';
 
 const router = Router();
+
+// Números do disparo (delay entre mensagens, limite diário, pausa automática
+// a cada N mensagens) -- o frontend usa isso pra exibir, ex: "pausa automática
+// de 10min a cada 20 mensagens" na aba Disparo, sem precisar hardcodar esses
+// valores (eles vêm de env var no backend e podem mudar).
+router.get('/disparo', (req, res) => {
+  res.json(configDisparo());
+});
 
 router.get('/estrategia', async (req, res) => {
   try {

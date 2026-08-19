@@ -25,11 +25,19 @@ services:
       - key: MAX_DELAY_MS
         value: 15000
       - key: DAILY_LIMIT
-        value: 100
+        value: 300
       - key: BATCH_SIZE
         value: 20
       - key: BATCH_PAUSE_MS
         value: 600000
+      - key: RETENCAO_FATURAS_DIAS
+        value: 40
+      - key: PIX_MAX_ARQUIVOS
+        value: 400
+      - key: PIX_MAX_ARQUIVO_MB
+        value: 20
+      - key: PIX_MAX_TOTAL_MB
+        value: 800
       - key: WEBHOOK_URL
         sync: false
       - key: WEBHOOK_SECRET

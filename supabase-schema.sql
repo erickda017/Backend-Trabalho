@@ -8,6 +8,7 @@ create table if not exists clientes (
   vencimento text,
   pdf_url text,
   pdf_path text,
+  pdf_atualizado_em timestamptz, -- data do último upload do PDF -- usado pela limpeza automática (40 dias, ver migration-7)
   pix_code text, -- extraído automaticamente do QR code do PDF (ver src/lib/pixFromPdf.js)
   created_at timestamptz default now()
 );
@@ -15,7 +16,7 @@ create table if not exists clientes (
 create table if not exists envios (
   id uuid primary key default gen_random_uuid(),
   template_mensagem text not null,
-  status text not null default 'pendente', -- pendente | agendado | em_andamento | pausado | concluido
+  status text not null default 'pendente', -- pendente | agendado | em_andamento | pausado | concluido | cancelado
   agendado_para timestamptz, -- se preenchido, o envio só começa automaticamente nesse horário
   retomar_em timestamptz, -- quando pausado por limite diário, quando deve retomar automaticamente
   created_at timestamptz default now(),
@@ -26,7 +27,7 @@ create table if not exists envio_itens (
   id uuid primary key default gen_random_uuid(),
   envio_id uuid references envios(id) on delete cascade,
   cliente_id uuid references clientes(id) on delete cascade,
-  status text not null default 'pendente', -- pendente | enviado | erro | numero_invalido
+  status text not null default 'pendente', -- pendente | enviado | erro | numero_invalido | cancelado
   mensagem_override text, -- se preenchido, sobrescreve o template do envio para este item
   erro text,
   message_id text, -- id da mensagem no WhatsApp (Baileys), usado pra casar com o webhook de status
@@ -144,6 +145,10 @@ create table if not exists conversas (
   nao_lidas integer not null default 0,
   ultima_mensagem text,
   ultima_mensagem_em timestamptz,
+  -- true = `telefone` não é um número real, é um id opaco de "@lid" que o
+  -- WhatsApp ainda não resolveu pra gente (ver migration-10 e chatIngest.js).
+  -- Nunca usar nesse estado pra disparo em massa nem pra formar JID.
+  numero_nao_confirmado boolean not null default false,
   created_at timestamptz default now()
 );
 

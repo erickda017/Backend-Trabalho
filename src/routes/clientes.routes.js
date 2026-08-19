@@ -2,7 +2,6 @@ import { Router } from 'express';
 import multer from 'multer';
 import { supabase, BUCKET } from '../lib/supabase.js';
 import { normalizarTelefone } from '../lib/telefone.js';
-import { extrairPixDoPdf } from '../lib/pixFromPdf.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
 import { parseListaClientes } from '../lib/parseListaClientes.js';
@@ -22,6 +21,15 @@ const upload = multer({
 // Achata cliente_tags(tags(...)) pra um array simples `tags: [{id,nome,cor}]`
 function achatarTags({ cliente_tags, ...c }) {
   return { ...c, tags: (cliente_tags || []).map((ct) => ct.tags).filter(Boolean) };
+}
+
+// Nome de arquivo seguro pra usar como parte da chave do Storage: mantém só
+// caracteres inofensivos e nunca deixa passar "/", "\" ou "..", que
+// permitiriam ao originalname (controlado por quem faz o upload) escapar da
+// pasta `${id}/` pretendida e escrever em outro caminho do bucket.
+function nomeArquivoSeguro(nome) {
+  const base = String(nome || 'arquivo.pdf').split(/[\\/]/).pop() || 'arquivo.pdf';
+  return base.replace(/\.\./g, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'arquivo.pdf';
 }
 
 // ---------------------------------------------------------------------------
@@ -153,12 +161,18 @@ router.post('/', async (req, res) => {
   res.status(201).json({ ...data, tags: [] });
 });
 
-// Upload/associação do PDF da fatura a um cliente
+// Upload/associação do PDF da fatura a um cliente.
+// [2026-08] O backend NÃO extrai mais o Pix do PDF (removido @napi-rs/canvas +
+// jsQR + pdfjs-dist daqui). O navegador já fatia o PDF e chama o Cloudflare
+// Worker de OCR ANTES de mandar o arquivo pra cá (ver
+// frontend/src/lib/pixWorkerClient.ts) -- os campos pixCode/valor/vencimento/
+// linhaDigitavel, se enviados no body junto do arquivo, já vêm prontos do
+// Worker; esta rota só guarda o PDF no Storage e persiste o que recebeu.
 router.post('/:id/pdf', upload.single('pdf'), async (req, res) => {
   const { id } = req.params;
   if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
 
-  const caminho = `${id}/${Date.now()}-${req.file.originalname}`;
+  const caminho = `${id}/${Date.now()}-${nomeArquivoSeguro(req.file.originalname)}`;
 
   const { error: uploadError } = await supabase.storage
     .from(BUCKET)
@@ -168,13 +182,19 @@ router.post('/:id/pdf', upload.single('pdf'), async (req, res) => {
 
   const { data: publicUrlData } = supabase.storage.from(BUCKET).getPublicUrl(caminho);
 
-  // Tenta achar um QR code Pix na fatura e já deixa salvo/atribuído ao cliente --
-  // se não achar, pix_code fica null sem quebrar o upload em si.
-  const pixCode = await extrairPixDoPdf(req.file.buffer);
+  const { pixCode, valor, vencimento, linhaDigitavel } = req.body || {};
 
   const { data, error } = await supabase
     .from('clientes')
-    .update({ pdf_url: publicUrlData.publicUrl, pdf_path: caminho, pix_code: pixCode })
+    .update({
+      pdf_url: publicUrlData.publicUrl,
+      pdf_path: caminho,
+      pix_code: pixCode || null,
+      ...(valor ? { valor } : {}),
+      ...(vencimento ? { vencimento } : {}),
+      ...(linhaDigitavel ? { linha_digitavel: linhaDigitavel } : {}),
+      pdf_atualizado_em: new Date().toISOString(),
+    })
     .eq('id', id)
     .select('*, cliente_tags(tags(id, nome, cor))')
     .single();
@@ -188,6 +208,14 @@ router.put('/:id', async (req, res) => {
   const { id } = req.params;
   const { nome, telefone, valor, vencimento } = req.body;
 
+  // `valor` só entra no update se foi de fato enviado no body -- antes,
+  // `valor ? ... : null` recaía em `null` sempre que o campo vinha
+  // ausente/undefined (não só quando o usuário queria limpá-lo), então
+  // qualquer PUT parcial que não reenviasse o valor (ex: editar só o nome via
+  // outra tela/integração) apagava silenciosamente o valor já cadastrado do
+  // cliente. Agora só grava algo em `valor` quando a chave foi enviada; para
+  // limpar de propósito, o chamador ainda pode mandar `valor: ""`/`null`.
+  const valorFoiEnviado = Object.prototype.hasOwnProperty.call(req.body, 'valor');
   const valorNormalizado = valor ? String(valor).trim().replace(',', '.') : null;
   const telefoneNormalizado = telefone ? normalizarTelefone(telefone) : undefined;
   if (telefone && !telefoneNormalizado) {
@@ -199,7 +227,7 @@ router.put('/:id', async (req, res) => {
     .update({
       nome,
       ...(telefoneNormalizado ? { telefone: telefoneNormalizado } : {}),
-      valor: valorNormalizado,
+      ...(valorFoiEnviado ? { valor: valorNormalizado } : {}),
       vencimento,
     })
     .eq('id', id)

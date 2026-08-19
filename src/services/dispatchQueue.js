@@ -8,7 +8,8 @@ const MIN_DELAY = Number(process.env.MIN_DELAY_MS || 5000);
 const MAX_DELAY = Number(process.env.MAX_DELAY_MS || 15000);
 
 // Limite diário de mensagens (todas os envios somados). 0 = sem limite.
-const DAILY_LIMIT = Number(process.env.DAILY_LIMIT || 100);
+// [2026-08] Subido de 100 -> 300/dia a pedido do usuário (volume maior de faturas).
+const DAILY_LIMIT = Number(process.env.DAILY_LIMIT || 300);
 
 // A cada N mensagens enviadas, faz uma pausa mais longa (simula comportamento humano)
 const BATCH_SIZE = Number(process.env.BATCH_SIZE || 20);
@@ -21,6 +22,18 @@ const RECONEXAO_RETRY_MS = Number(process.env.RECONEXAO_RETRY_MS || 2 * 60 * 100
 
 let isRunning = false;
 let contadorLote = 0;
+
+// Id do envio que está rodando NESTE processo agora (null se nenhum). Usado
+// pelas rotas de pausar/cancelar pra saber se dá pra sinalizar o loop em
+// memória (mais rápido, para entre um item e outro) ou se precisa mexer
+// direto no banco (caso o envio esteja 'em_andamento' só porque o processo
+// caiu no meio -- ver recuperarEnviosTravados).
+let envioAtualId = null;
+
+// Sinalizações de pausar/cancelar pedidas via API enquanto o loop de
+// processarDisparo está rodando. O loop confere isso a cada item enviado.
+const pauseRequests = new Set();
+const cancelRequests = new Set();
 
 // Brasil não observa horário de verão desde 2019 -- offset fixo -03:00.
 const OFFSET_BR = '-03:00';
@@ -52,6 +65,21 @@ export function montarMensagem(template, cliente) {
     .replaceAll('{{pix}}', cliente.pix_code || '');
 }
 
+// Sorteia uma das (até 5) variações de mensagem cadastradas no envio. Existir
+// mais de um texto possível -- com pequenas diferenças de redação -- e
+// escolher aleatoriamente qual sai em cada mensagem ajuda a evitar o padrão
+// "mesmo texto pra todo mundo" que aumenta risco de bloqueio do número.
+// Sem variações cadastradas (lotes antigos, ou só 1 preenchida), cai no
+// template_mensagem normal -- comportamento igual a antes.
+export function escolherTemplate(envio) {
+  const variacoes = Array.isArray(envio.variacoes_mensagem)
+    ? envio.variacoes_mensagem.filter((v) => typeof v === 'string' && v.trim().length > 0)
+    : [];
+  if (!variacoes.length) return envio.template_mensagem;
+  const indice = Math.floor(Math.random() * variacoes.length);
+  return variacoes[indice];
+}
+
 // Conta quantas mensagens já foram enviadas hoje (considerando todos os envios)
 async function contarEnviadosHoje() {
   const inicioDoDia = inicioDoDiaBR();
@@ -74,7 +102,7 @@ function proximaJanela() {
 
 async function enviarItem(item, envio) {
   const cliente = item.clientes;
-  const templateDoItem = item.mensagem_override || envio.template_mensagem;
+  const templateDoItem = item.mensagem_override || escolherTemplate(envio);
   const mensagem = montarMensagem(templateDoItem, cliente);
 
   // Escolhe o slot pra ESTA mensagem: slot fixo do envio, ou a estratégia
@@ -158,6 +186,7 @@ export async function processarDisparo(envioId) {
     throw new Error('Já existe um disparo em andamento. Aguarde finalizar.');
   }
   isRunning = true;
+  envioAtualId = envioId;
 
   try {
     const { data: envio, error: envioError } = await supabase
@@ -191,6 +220,29 @@ export async function processarDisparo(envioId) {
 
     try {
       for (const item of itens) {
+        // Pausar/cancelar pedido via API (botão na aba Disparo/Histórico). Checado
+        // no início de cada item -- nunca interrompe um envio já em voo, só evita
+        // começar o próximo. Cancelar tem prioridade se os dois foram pedidos.
+        if (cancelRequests.has(envioId)) {
+          cancelRequests.delete(envioId);
+          pauseRequests.delete(envioId);
+          await supabase
+            .from('envios')
+            .update({ status: 'cancelado', finalizado_em: new Date().toISOString() })
+            .eq('id', envioId);
+          await marcarItensPendentesComoCancelados(envioId);
+          await dispararWebhook('disparo_cancelado', { envio_id: envioId });
+          console.log(`[dispatch] disparo ${envioId} cancelado pelo usuário.`);
+          return;
+        }
+        if (pauseRequests.has(envioId)) {
+          pauseRequests.delete(envioId);
+          await supabase.from('envios').update({ status: 'pausado', retomar_em: null }).eq('id', envioId);
+          await dispararWebhook('disparo_pausado_manual', { envio_id: envioId });
+          console.log(`[dispatch] disparo ${envioId} pausado pelo usuário.`);
+          return;
+        }
+
         // Sem isso: se o WhatsApp cair no meio do disparo (ex: celular sem internet,
         // sessão derrubada), o loop continuava e marcava CADA item restante como
         // 'erro' um por um -- ainda esperando o delay normal entre eles -- em vez de
@@ -279,6 +331,14 @@ export async function processarDisparo(envioId) {
     await dispararWebhook('disparo_concluido', { envio_id: envioId });
   } finally {
     isRunning = false;
+    envioAtualId = null;
+    // Limpa qualquer pedido de pausar/cancelar que não chegou a ser consumido
+    // (ex: pedido chegou depois do último item, ou o envio terminou/pausou por
+    // outro motivo antes do loop checar de novo) -- não deixa "vazando" pro
+    // próximo envio que vier a usar esse mesmo id (não deveria acontecer, mas
+    // não custa garantir).
+    pauseRequests.delete(envioId);
+    cancelRequests.delete(envioId);
   }
 }
 
@@ -297,6 +357,84 @@ export async function reenviarErros(envioId) {
 
 export function disparoEmAndamento() {
   return isRunning;
+}
+
+// Id do envio rodando agora neste processo (null se nenhum) -- usado pelas
+// rotas pra decidir como aplicar pausar/cancelar.
+export function envioEmExecucaoId() {
+  return isRunning ? envioAtualId : null;
+}
+
+// Configuração do disparo, pro frontend mostrar (ex: "pausa automática de 10min
+// a cada 20 mensagens") sem precisar hardcodar esses números no front.
+export function configDisparo() {
+  return {
+    min_delay_ms: MIN_DELAY,
+    max_delay_ms: MAX_DELAY,
+    daily_limit: DAILY_LIMIT,
+    batch_size: BATCH_SIZE,
+    batch_pause_ms: BATCH_PAUSE_MS,
+  };
+}
+
+// Pede pra pausar um envio (retomada manual só, via botão "Continuar
+// disparo" -- por isso retomar_em fica null, diferente da pausa automática
+// por limite diário/queda de conexão). Se o envio está rodando NESTE
+// processo, só sinaliza -- o loop para com segurança depois do item atual
+// (nunca no meio de um envio) e atualiza o status sozinho. Se não está
+// rodando aqui (ex: preso em 'em_andamento' de um processo anterior que
+// caiu, antes de recuperarEnviosTravados rodar), atualiza direto no banco.
+export async function solicitarPausa(envioId) {
+  if (isRunning && envioAtualId === envioId) {
+    pauseRequests.add(envioId);
+    return { status: 'pausando' };
+  }
+
+  const { data, error } = await supabase
+    .from('envios')
+    .update({ status: 'pausado', retomar_em: null })
+    .eq('id', envioId)
+    .eq('status', 'em_andamento')
+    .select('id')
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error('Este envio não está em andamento no momento.');
+  return { status: 'pausado' };
+}
+
+// Pede pra cancelar (interromper de vez) um envio. Itens já enviados
+// continuam enviados; os itens ainda pendentes são marcados como 'cancelado'
+// (não ficam "pendente" pra sempre -- sem isso o dashboard e os filtros de
+// histórico continuavam contando como pendente algo que nunca mais vai ser
+// disparado). Não é retomável pelo scheduler nem pelo botão "Continuar
+// disparo" (status 'cancelado' não aparece nas condições deles).
+export async function solicitarCancelamento(envioId) {
+  if (isRunning && envioAtualId === envioId) {
+    cancelRequests.add(envioId);
+    return { status: 'cancelando' };
+  }
+
+  const { data, error } = await supabase
+    .from('envios')
+    .update({ status: 'cancelado', finalizado_em: new Date().toISOString() })
+    .eq('id', envioId)
+    .in('status', ['em_andamento', 'pendente', 'pausado', 'agendado'])
+    .select('id')
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error('Este envio não pode mais ser cancelado (já foi concluído ou não existe).');
+
+  await marcarItensPendentesComoCancelados(envioId);
+  return { status: 'cancelado' };
+}
+
+async function marcarItensPendentesComoCancelados(envioId) {
+  const { error } = await supabase
+    .from('envio_itens')
+    .update({ status: 'cancelado' })
+    .eq('envio_id', envioId)
+    .eq('status', 'pendente');
+  if (error) console.error(`[dispatch] erro ao marcar itens pendentes como cancelados (envio ${envioId}):`, error.message);
 }
 
 // Roda uma vez na inicialização do servidor. Se o processo morreu (crash, redeploy)

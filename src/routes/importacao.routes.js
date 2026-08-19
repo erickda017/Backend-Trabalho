@@ -1,47 +1,19 @@
 import { Router } from 'express';
 import multer from 'multer';
 import XLSX from 'xlsx';
-import { processarImportacao, processarImportacaoLotePronto } from '../services/importLote.js';
+import { processarImportacaoLotePronto } from '../services/importLote.js';
 import { normalizarTelefone } from '../lib/telefone.js';
 import { supabase, BUCKET } from '../lib/supabase.js';
 
 const router = Router();
-// Multer com memoryStorage guarda o arquivo INTEIRO na RAM do processo (o mesmo
-// processo que mantém a sessão do WhatsApp aberta). 200MB por arquivo permitia,
-// na prática, zip + planilha somando bem mais que a RAM de planos como o Render
-// free (512MB) só pra receber o upload -- antes mesmo de processar PDF nenhum.
-// 80MB é mais coerente com esse tipo de hospedagem; ainda cobre bastante volume
-// (na faixa de 30-40 boletos de ~2MB cada por importação). Pra lotes maiores,
-// a orientação é usar a importação client-side (ver POST /lote abaixo), que não
-// passa PDF nenhum pelo servidor -- ou importar em partes até migrar de plano.
-const LIMITE_ARQUIVO_BYTES = 80 * 1024 * 1024;
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: LIMITE_ARQUIVO_BYTES },
-  fileFilter: (req, file, cb) => {
-    const tiposPlanilha = [
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
-      'application/vnd.ms-excel', // .xls
-      'text/csv',
-      'application/csv',
-      'application/octet-stream', // alguns navegadores mandam isso pra csv/xlsx
-    ];
-    if (file.fieldname === 'planilha' && !tiposPlanilha.includes(file.mimetype)) {
-      return cb(new Error('Planilha deve ser .xlsx, .xls ou .csv'));
-    }
-    if (file.fieldname === 'zip' && !['application/zip', 'application/x-zip-compressed', 'application/octet-stream'].includes(file.mimetype)) {
-      return cb(new Error('O arquivo de PDFs deve ser um .zip'));
-    }
-    cb(null, true);
-  },
-});
 
 const MENSAGEM_PADRAO =
   'Olá {{nome}}, tudo bem? Segue em anexo sua fatura no valor de {{valor}}, com vencimento em {{vencimento}}. Qualquer dúvida estou à disposição!';
 
-// Multer só pra 1 PDF por vez (repasse pro Storage) -- nada a ver com o multer
-// acima (que é pro fluxo antigo com zip+planilha inteiros). 15MB cobre boleto
-// tranquilo; se algum PDF passar disso o problema é o PDF, não o limite.
+// Multer só pra 1 PDF por vez (repasse pro Storage) -- é o único ponto do
+// backend que ainda encosta em bytes de PDF, e mesmo assim só pra guardar
+// (nunca processa/lê o conteúdo). 15MB cobre boleto tranquilo; se algum PDF
+// passar disso o problema é o PDF, não o limite.
 const uploadPdfUnico = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 },
@@ -52,11 +24,10 @@ const uploadPdfUnico = multer({
 // RLS) está bloqueado nesse projeto Supabase por uma causa que não é do código
 // (bucket/policy/grant conferem, Postgres nega mesmo assim -- ver conversa/
 // investigação). Isso NÃO reintroduz o problema de RAM que a migration-5 tentava
-// evitar: o navegador continua fazendo o trabalho pesado (render do PDF em
-// canvas + leitura de QR pra achar o Pix, em pixFromPdfBrowser.ts) -- aqui só
-// passa os bytes já prontos, sem processar nada.
-// Wrapper igual ao uploadComTratamentoDeErro (linha ~88), só que pro upload de
-// 1 PDF avulso -- mesmo motivo: erro do multer (arquivo grande) não cai no
+// evitar: o navegador continua fazendo o trabalho pesado (fatiar o PDF com
+// pdf-lib + chamar o Worker de OCR pra achar o Pix, em pixWorkerClient.ts) --
+// aqui só passa os bytes já prontos, sem processar nada.
+// Wrapper pro upload de 1 PDF avulso -- erro do multer (arquivo grande) não cai no
 // try/catch do handler, precisa ser pego aqui pra devolver 413 com mensagem
 // clara em vez do 500 genérico padrão do Express.
 function uploadPdfComTratamentoDeErro(req, res, next) {
@@ -70,12 +41,29 @@ function uploadPdfComTratamentoDeErro(req, res, next) {
   });
 }
 
+// Valida o "caminho" informado pelo cliente antes de usá-lo como object key no
+// Storage. Sem isso, qualquer usuário autenticado podia mandar um `caminho`
+// arbitrário (ex: "../outra-pasta/arquivo.pdf" ou o caminho exato de OUTRO
+// cliente) e, como o upload usa upsert:true, sobrescrever/acessar arquivos que
+// não são dela -- uma falha de controle de acesso (IDOR), não só um path
+// traversal. Aceita apenas letras/números/`-`/`_`/`.`/`/` e bloqueia qualquer
+// segmento "..".
+const CAMINHO_VALIDO = /^[a-zA-Z0-9_\-./]+$/;
+function caminhoSeguro(caminho) {
+  if (!caminho || typeof caminho !== 'string') return null;
+  const normalizado = caminho.trim().replace(/^\/+/, '');
+  if (!normalizado) return null;
+  if (!CAMINHO_VALIDO.test(normalizado)) return null;
+  if (normalizado.split('/').some((segmento) => segmento === '..' || segmento === '.')) return null;
+  return normalizado;
+}
+
 router.post('/upload-pdf', uploadPdfComTratamentoDeErro, async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
-    const caminho = req.body?.caminho;
-    if (!caminho || typeof caminho !== 'string') {
-      return res.status(400).json({ error: 'campo "caminho" é obrigatório' });
+    const caminho = caminhoSeguro(req.body?.caminho);
+    if (!caminho) {
+      return res.status(400).json({ error: 'campo "caminho" é obrigatório e não pode conter ".." ou caracteres inválidos' });
     }
 
     const { error: uploadError } = await supabase.storage
@@ -93,62 +81,19 @@ router.post('/upload-pdf', uploadPdfComTratamentoDeErro, async (req, res) => {
   }
 });
 
-// Wrapper em volta do middleware do multer -- erros de upload (arquivo grande
-// demais, tipo errado no fileFilter) acontecem DENTRO do parsing do
-// multipart/form-data, ou seja, antes do handler da rota rodar. O multer não
-// joga esses erros pro try/catch do handler: ele chama next(err), que só é
-// pego pelo error handler GLOBAL do server.js (que responde com uma mensagem
-// genérica em inglês, tipo "File too large"). Interceptamos aqui pra devolver
-// a mensagem certa, em português, com orientação do que fazer.
-function uploadComTratamentoDeErro(req, res, next) {
-  const middleware = upload.fields([
-    { name: 'planilha', maxCount: 1 },
-    { name: 'zip', maxCount: 1 },
-  ]);
-
-  middleware(req, res, (err) => {
-    if (!err) return next();
-
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({
-        error: `Arquivo muito grande (limite: ${Math.round(LIMITE_ARQUIVO_BYTES / 1024 / 1024)}MB por arquivo). ` +
-          'Divida a importação em levas menores (ex: 30-40 clientes por vez), ou use a importação ' +
-          'pelo navegador (que não tem esse limite, pois não envia PDF pro servidor).',
-      });
-    }
-
-    // erros lançados no fileFilter (tipo de arquivo errado) e outros erros do multer
-    console.error('[importacao] erro no upload:', err.message);
-    return res.status(400).json({ error: err.message || 'Erro ao processar o upload' });
+// [2026-08] Rota antiga removida: recebia "planilha" + "zip" (PDFs binários)
+// via multipart/form-data e processava tudo no servidor (render em canvas +
+// QR). Isso NUNCA MAIS deve acontecer -- nenhum PDF pode chegar ao backend
+// sem já ter passado pelo fatiamento + Cloudflare Worker no navegador (ver
+// POST /lote abaixo). Mantemos a rota respondendo 410 pra front antigo em
+// cache não falhar silenciosamente / com erro genérico.
+router.post('/', (req, res) => {
+  res.status(410).json({
+    error:
+      'Este fluxo de importação (upload direto de zip com PDFs) foi descontinuado. ' +
+      'Use a importação pelo navegador (POST /api/importacao/lote), que fatia e processa ' +
+      'os PDFs no cliente antes de enviar qualquer dado ao servidor.',
   });
-}
-
-// multipart/form-data com dois arquivos: "planilha" (.xlsx/.csv) e "zip" (pdfs) + "mensagem" (opcional)
-// FLUXO ANTIGO (server-side): o backend recebe o zip inteiro, renderiza cada PDF
-// em canvas e escaneia QR pra achar o Pix. Mantido como fallback, mas o fluxo
-// recomendado pra lotes grandes é POST /lote (ver abaixo), que faz esse trabalho
-// pesado no navegador de quem importa, não no servidor.
-router.post('/', uploadComTratamentoDeErro, async (req, res) => {
-  try {
-    const planilhaFile = req.files?.planilha?.[0];
-    const zipFile = req.files?.zip?.[0];
-
-    if (!planilhaFile) return res.status(400).json({ error: 'Envie a planilha (campo "planilha")' });
-    if (!zipFile) return res.status(400).json({ error: 'Envie o zip com os PDFs (campo "zip")' });
-
-    const templateMensagemPadrao = req.body?.mensagem?.trim() || MENSAGEM_PADRAO;
-
-    const resultado = await processarImportacao({
-      planilhaBuffer: planilhaFile.buffer,
-      zipBuffer: zipFile.buffer,
-      templateMensagemPadrao,
-    });
-
-    res.status(201).json(resultado);
-  } catch (err) {
-    console.error('[importacao] erro:', err);
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // Limites de sanidade pro payload do lote pronto -- aqui não tem PDF (só texto:
@@ -170,18 +115,19 @@ function validarItemLote(item) {
   if (!telefoneNormalizado) return 'telefone inválido';
   if (item.pdf_url && typeof item.pdf_url !== 'string') return 'pdf_url inválido';
   if (item.pdf_path && typeof item.pdf_path !== 'string') return 'pdf_path inválido';
+  if (item.linha_digitavel && typeof item.linha_digitavel !== 'string') return 'linha_digitavel inválida';
   return null;
 }
 
 // Importação client-side: o navegador de quem importa já fez todo o trabalho
-// pesado (parse do zip com JSZip, parse da planilha com SheetJS, extração de Pix
-// via pdfjs-dist + jsQR, e upload de cada PDF direto pro Supabase Storage usando
-// a sessão autenticada do usuário -- ver frontend/src/lib/importacaoBrowser.ts e
-// pixFromPdfBrowser.ts). O servidor só recebe texto: nome/telefone/valor/URL do
-// PDF já hospedado/código Pix já extraído -- nunca vê um PDF, nunca renderiza
-// canvas, nunca escaneia QR. Por isso pode processar uma importação de 100+
-// clientes sem chegar perto de estourar RAM, mesmo num plano de hospedagem
-// pequeno (Render free, 512MB).
+// pesado (parse do zip com JSZip, parse da planilha com SheetJS, fatiamento do
+// PDF com pdf-lib + extração via Cloudflare Worker de OCR, e upload de cada
+// PDF direto pro Supabase Storage usando a sessão autenticada do usuário --
+// ver frontend/src/lib/importacaoBrowser.ts e pixWorkerClient.ts). O servidor
+// só recebe texto: nome/telefone/valor/vencimento/linha digitável/URL do PDF
+// já hospedado/código Pix já extraído -- nunca vê um PDF, nunca faz OCR. Por
+// isso pode processar uma importação de 100+ clientes sem chegar perto de
+// estourar RAM, mesmo num plano de hospedagem pequeno (Render free, 512MB).
 router.post('/lote', async (req, res) => {
   try {
     const { itens, mensagem, lote } = req.body || {};
@@ -230,9 +176,9 @@ router.post('/lote', async (req, res) => {
 });
 
 // Planilha modelo pra baixar e preencher -- mesmas colunas (com variações aceitas)
-// que parsePlanilha() em importLote.js reconhece. "arquivo" é o nome do PDF dentro
-// do zip que vai ser importado junto; se não usar zip (só disparo por planilha
-// avulsa via seleção manual), pode deixar em branco.
+// que parsePlanilha() em frontend/src/lib/importacaoBrowser.ts reconhece. "arquivo"
+// é o nome do PDF dentro do zip que vai ser importado junto; se não usar zip (só
+// disparo por planilha avulsa via seleção manual), pode deixar em branco.
 router.get('/modelo', (req, res) => {
   const linhas = [
     {

@@ -7,6 +7,8 @@ import {
   reenviarErros,
   disparoEmAndamento,
   montarMensagem,
+  solicitarPausa,
+  solicitarCancelamento,
 } from '../services/dispatchQueue.js';
 import {
   enviarMensagemComPdf,
@@ -23,13 +25,14 @@ const router = Router();
 // a partir das linhas de envio_itens -- usado tanto no resumo de um envio quanto
 // na listagem (montado em lote pra não fazer N+1 query).
 function agregarContadores(itens) {
-  const c = { total: 0, enviados: 0, entregues: 0, lidos: 0, falhas: 0, numeros_invalidos: 0, pendentes: 0 };
+  const c = { total: 0, enviados: 0, entregues: 0, lidos: 0, falhas: 0, numeros_invalidos: 0, pendentes: 0, cancelados: 0 };
   for (const item of itens) {
     c.total++;
     if (item.status === 'pendente') c.pendentes++;
     if (item.status === 'erro') c.falhas++;
     if (item.status === 'numero_invalido') c.numeros_invalidos++;
     if (item.status === 'enviado') c.enviados++;
+    if (item.status === 'cancelado') c.cancelados++;
     if (item.status_entrega === 'entregue' || item.status_entrega === 'lido') c.entregues++;
     if (item.status_entrega === 'lido') c.lidos++;
   }
@@ -114,9 +117,19 @@ router.post('/teste', async (req, res) => {
 // body: { mensagem, cliente_ids[], tag_ids[], intervalo_ms, janela_ms, agendado_para?, slot? }
 // ---------------------------------------------------------------------------
 router.post('/', async (req, res) => {
-  const { mensagem, cliente_ids = [], tag_ids = [], intervalo_ms, janela_ms, agendado_para, slot } = req.body || {};
+  const { mensagem, mensagens, cliente_ids = [], tag_ids = [], intervalo_ms, janela_ms, agendado_para, slot } = req.body || {};
 
-  if (!mensagem) {
+  // `mensagens`: array com até 5 variações do texto (ver migration-9). O
+  // front manda sempre esse array quando o usuário preenche mais de uma
+  // variação; `mensagem` continua existindo por compatibilidade (1ª
+  // variação, usada como "o" template do lote em telas/exportações antigas).
+  const variacoes = Array.isArray(mensagens)
+    ? mensagens.map((m) => (typeof m === 'string' ? m.trim() : '')).filter(Boolean).slice(0, 5)
+    : [];
+
+  const mensagemPrincipal = mensagem || variacoes[0];
+
+  if (!mensagemPrincipal) {
     return res.status(400).json({ error: 'mensagem é obrigatória' });
   }
 
@@ -134,7 +147,8 @@ router.post('/', async (req, res) => {
   const { data: envio, error: envioError } = await supabase
     .from('envios')
     .insert({
-      template_mensagem: mensagem,
+      template_mensagem: mensagemPrincipal,
+      variacoes_mensagem: variacoes.length ? variacoes : [mensagemPrincipal],
       status: agendado_para ? 'agendado' : 'pendente',
       agendado_para: agendado_para || null,
       slot: slot || null,
@@ -155,7 +169,7 @@ router.post('/', async (req, res) => {
   const { error: itensError } = await supabase.from('envio_itens').insert(itens);
   if (itensError) return res.status(500).json({ error: itensError.message });
 
-  res.status(201).json(montarEnvioResumo(envio, { total: itens.length, enviados: 0, entregues: 0, lidos: 0, falhas: 0, numeros_invalidos: 0, pendentes: itens.length }));
+  res.status(201).json(montarEnvioResumo(envio, { total: itens.length, enviados: 0, entregues: 0, lidos: 0, falhas: 0, numeros_invalidos: 0, pendentes: itens.length, cancelados: 0 }));
 });
 
 // Dispara o envio imediatamente (assíncrono, roda em background)
@@ -178,6 +192,29 @@ router.post('/:id/reenviar-erros', async (req, res) => {
   const { id } = req.params;
   reenviarErros(id).catch((err) => console.error('[envios] erro ao reenviar:', err));
   res.json({ ok: true, mensagem: 'Reenvio dos itens com erro iniciado em background' });
+});
+
+// Pausa um envio em andamento (retomada só manual, pelo botão "Continuar
+// disparo" -- não é o scheduler que retoma sozinho, diferente da pausa por
+// limite diário/queda de conexão).
+router.post('/:id/pausar', async (req, res) => {
+  try {
+    const resultado = await solicitarPausa(req.params.id);
+    res.json({ ok: true, ...resultado });
+  } catch (err) {
+    res.status(409).json({ error: err.message });
+  }
+});
+
+// Cancela (interrompe de vez) um envio. Itens já enviados continuam
+// enviados; os pendentes deixam de ser processados e não é retomável.
+router.post('/:id/cancelar', async (req, res) => {
+  try {
+    const resultado = await solicitarCancelamento(req.params.id);
+    res.json({ ok: true, ...resultado });
+  } catch (err) {
+    res.status(409).json({ error: err.message });
+  }
 });
 
 // Agenda (ou reagenda) o horário de início de um envio ainda não iniciado
@@ -205,6 +242,25 @@ router.patch('/:id/agendar', async (req, res) => {
   if (itensError) return res.status(500).json({ error: itensError.message });
 
   res.json(montarEnvioResumo(data, agregarContadores(itens || [])));
+});
+
+// Envio "ativo" no momento -- em_andamento (rodando de verdade) ou pausado
+// (por limite diário, queda de conexão, ou manual). Existe pra aba Disparo
+// conseguir mostrar um lote em andamento mesmo se o navegador/aba foi aberto
+// de novo (sessionStorage perdido) ou se o servidor caiu e voltou -- a fonte
+// de verdade é o banco, não o estado local do front.
+// Precisa vir ANTES de /:id pra não ser capturada como um id.
+router.get('/ativo', async (req, res) => {
+  const { data, error } = await supabase
+    .from('envios')
+    .select('id, status')
+    .in('status', ['em_andamento', 'pausado'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ id: data?.id ?? null, status: data?.status ?? null });
 });
 
 // Exportação (precisa vir ANTES de /:id pra não ser capturada como um id)
@@ -277,7 +333,13 @@ router.get('/:id/itens', async (req, res) => {
     .eq('envio_id', id)
     .order('created_at', { ascending: true });
 
-  if (filtro && filtro !== 'todos') query = query.eq('status', filtro);
+  // [2026-08] Bug corrigido: 'entregue'/'lido' são valores de status_entrega,
+  // não de status -- filtrar por status='entregue' nunca batia com nada (a
+  // coluna status só tem pendente/enviado/erro/numero_invalido/cancelado), os
+  // filtros "Entregues"/"Lidos" da aba Histórico sempre devolviam lista vazia.
+  if (filtro === 'entregue') query = query.in('status_entrega', ['entregue', 'lido']);
+  else if (filtro === 'lido') query = query.eq('status_entrega', 'lido');
+  else if (filtro && filtro !== 'todos') query = query.eq('status', filtro);
   if (clienteIdsFiltrados) query = query.in('cliente_id', clienteIdsFiltrados);
 
   const { data, error } = await query.range(from, to);

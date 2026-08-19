@@ -78,12 +78,19 @@ router.post('/conversas/:id/mensagens', upload.single('anexo'), async (req, res)
 
   const { data: conversa, error: conversaError } = await supabase
     .from('conversas')
-    .select('telefone, slot')
+    .select('telefone, slot, numero_nao_confirmado')
     .eq('id', id)
     .maybeSingle();
 
   if (conversaError) return res.status(500).json({ error: conversaError.message });
   if (!conversa) return res.status(404).json({ error: 'conversa não encontrada' });
+  // O WhatsApp ainda não revelou o número real desse contato (protegido por @lid) --
+  // não dá pra mandar mensagem sem o telefone de verdade. Espera o contato mandar
+  // outra mensagem (às vezes o número aparece depois) ou vincule manualmente um
+  // cliente cadastrado a essa conversa.
+  if (conversa.numero_nao_confirmado) {
+    return res.status(400).json({ error: 'Ainda não temos o número real deste contato (o WhatsApp está ocultando-o). Aguarde uma nova mensagem dele ou vincule um cliente cadastrado.' });
+  }
 
   try {
     let anexoUrl = null;

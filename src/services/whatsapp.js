@@ -169,6 +169,22 @@ export async function conectarSlot(slot) {
   // Mensagens novas (recebidas do cliente OU enviadas por outro app/celular ligado à
   // mesma conta). Grava no chat -- é o que faz a aba Chat ter dado de verdade.
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // Log de diagnóstico: mostra TODO evento que chega, mesmo os que a gente
+    // acaba ignorando depois. Isso existe pra responder uma pergunta específica:
+    // "quando eu respondo pelo celular, o evento chega aqui e a gente descarta,
+    // ou ele nem chega?" -- sem esse log era impossível saber (o catch abaixo só
+    // pega erro de banco, não mostra o que o Baileys de fato recebeu).
+    // Se aparecer "stubType" no log de uma mensagem fromMe=true, é sinal de que o
+    // WhatsApp não conseguiu decifrar o eco (sessão de criptografia entre o
+    // celular e esta conexão vinculada ficou dessincronizada) -- nesse caso a
+    // solução é reconectar (Desconectar + escanear o QR de novo), não um bug de
+    // código: sem a chave decifrada não tem texto nenhum pra salvar.
+    for (const m of messages) {
+      console.log(
+        `[whatsapp] slot ${slot} messages.upsert tipo=${type} fromMe=${m.key?.fromMe} remoteJid=${m.key?.remoteJid} id=${m.key?.id} temConteudo=${Boolean(m.message)} stubType=${m.messageStubType ?? '-'}`
+      );
+    }
+
     if (type !== 'notify') return; // 'notify' = mensagem nova chegando agora (ignora replays de sincronização, tratados abaixo)
     try {
       await registrarMensagensRecebidas(sock, messages, slot);

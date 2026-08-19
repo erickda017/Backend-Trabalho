@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import { startWhatsApp } from './services/whatsapp.js';
 import { iniciarScheduler } from './services/scheduler.js';
 import { recuperarEnviosTravados } from './services/dispatchQueue.js';
+import { iniciarLimpezaAutomatica } from './services/limpezaAutomatica.js';
 import { requireAuth } from './middleware/auth.js';
 import whatsappRoutes from './routes/whatsapp.routes.js';
 import clientesRoutes from './routes/clientes.routes.js';
@@ -17,6 +18,7 @@ import dashboardRoutes from './routes/dashboard.routes.js';
 import configuracoesRoutes from './routes/configuracoes.routes.js';
 import pixRoutes from './routes/pix.routes.js';
 import faturasRoutes from './routes/faturas.routes.js';
+import boletosRoutes from './routes/boletos.routes.js';
 
 dotenv.config();
 
@@ -71,6 +73,10 @@ app.use('/api/dashboard', requireAuth, dashboardRoutes);
 app.use('/api/configuracoes', requireAuth, configuracoesRoutes);
 app.use('/api/pix/extracoes', requireAuth, pixRoutes);
 app.use('/api/faturas', requireAuth, faturasRoutes);
+// Fluxo novo do extrator de PIX (boleto avulso, processado pelo Cloudflare
+// Worker no navegador -- ver boletos.routes.js). Fica junto do CORS acima,
+// que já libera a origem do front (FRONTEND_ORIGIN).
+app.use('/api/boletos', requireAuth, boletosRoutes);
 
 // Handler de erro global -- sem isso, erros como multer (arquivo grande demais, tipo
 // errado) ou qualquer exceção síncrona em uma rota caem no handler padrão do Express,
@@ -91,6 +97,7 @@ const server = app.listen(PORT, () => {
     console.error('[server] falha ao iniciar WhatsApp (servidor continua no ar):', err.message || err)
   );
   iniciarScheduler();
+  iniciarLimpezaAutomatica();
   recuperarEnviosTravados().catch((err) =>
     console.error('[server] falha ao recuperar envios travados:', err.message || err)
   );

@@ -48,7 +48,11 @@ create index if not exists pix_extracoes_usuario_id_idx on pix_extracoes (usuari
 drop index if exists clientes_telefone_key;
 create unique index if not exists clientes_usuario_telefone_key on clientes (usuario_id, telefone);
 
-drop index if exists conversas_telefone_key; -- nome do índice implícito do "unique" da coluna
+-- "conversas_telefone_key" foi criado como CONSTRAINT (telefone unique inline
+-- na definição da tabela), não como índice solto -- por isso precisa de
+-- DROP CONSTRAINT (que já remove o índice de suporte junto). Um DROP INDEX
+-- direto falha com erro 2BP01 ("... requires it"), por isso essa linha não
+-- existe mais aqui: só o DROP CONSTRAINT abaixo é necessário.
 alter table conversas drop constraint if exists conversas_telefone_key;
 create unique index if not exists conversas_usuario_telefone_key on conversas (usuario_id, telefone);
 

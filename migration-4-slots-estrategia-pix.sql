@@ -28,6 +28,7 @@ insert into estrategia_config (id) values (true) on conflict (id) do nothing;
 -- ---------------------------------------------------------------------------
 create table if not exists pix_extracoes (
   id uuid primary key default gen_random_uuid(),
+  usuario_id uuid references auth.users(id) on delete cascade, -- dono -- ver migration-13
   arquivo text not null,
   cliente_id uuid references clientes(id) on delete set null,
   status text not null default 'aguardando', -- aguardando | processando | encontrado | nao_encontrado | erro
@@ -38,11 +39,17 @@ create table if not exists pix_extracoes (
 );
 create index if not exists pix_extracoes_status_idx on pix_extracoes (status);
 create index if not exists pix_extracoes_cliente_id_idx on pix_extracoes (cliente_id);
+create index if not exists pix_extracoes_usuario_id_idx on pix_extracoes (usuario_id);
 
 alter table estrategia_config enable row level security;
 alter table pix_extracoes enable row level security;
 
--- Bucket pros PDFs enviados ao extrator (mesmo storage, pasta separada da de faturas)
+drop policy if exists "dono ve suas pix_extracoes" on pix_extracoes;
+create policy "dono ve suas pix_extracoes" on pix_extracoes for all to authenticated
+  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+
+-- PRIVADO: mesmo motivo dos buckets faturas/chat-midia -- pode conter PDF com
+-- dados pessoais de cliente. Leitura só via signed URL (ver src/lib/supabase.js).
 insert into storage.buckets (id, name, public)
-values ('pix-extracoes', 'pix-extracoes', true)
-on conflict (id) do nothing;
+values ('pix-extracoes', 'pix-extracoes', false)
+on conflict (id) do update set public = false;

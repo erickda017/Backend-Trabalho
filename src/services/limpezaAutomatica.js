@@ -56,6 +56,9 @@ async function limparFaturasDeClientes() {
   const ids = clientes.map((c) => c.id);
   const { error: updateError } = await supabase
     .from('clientes')
+    // pdf_url é coluna deprecated (ver migration-12) -- zeramos ela também só
+    // por precaução, caso ainda tenha algum valor residual de antes da
+    // migração pra bucket privado. A fonte da verdade real é pdf_path.
     .update({ pdf_url: null, pdf_path: null, pdf_atualizado_em: null })
     .in('id', ids);
 

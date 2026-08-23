@@ -15,8 +15,15 @@ function inicioDoDiaBR() {
   return new Date(`${dataSP}T00:00:00-03:00`).toISOString();
 }
 
-async function contar(tabela, filtros = {}) {
-  let query = supabase.from(tabela).select('*', { count: 'exact', head: true });
+// [2026-08] MULTI-TENANT: todo contador é escopado por usuario_id. Tabelas
+// com a coluna direto (clientes) filtram normal; envio_itens não tem
+// usuario_id próprio -- passa pelo join com envios (join!inner garante que só
+// conta linhas cujo envio pai é do usuário).
+async function contar(tabela, usuarioId, filtros = {}, { viaEnvios = false } = {}) {
+  let query = viaEnvios
+    ? supabase.from(tabela).select('*, envios!inner(usuario_id)', { count: 'exact', head: true }).eq('envios.usuario_id', usuarioId)
+    : supabase.from(tabela).select('*', { count: 'exact', head: true }).eq('usuario_id', usuarioId);
+
   for (const [coluna, valor] of Object.entries(filtros)) {
     if (valor && typeof valor === 'object' && valor.op === 'not_null') {
       query = query.not(coluna, 'is', null);
@@ -35,6 +42,7 @@ async function contar(tabela, filtros = {}) {
 
 router.get('/resumo', async (req, res) => {
   try {
+    const usuarioId = req.user.id;
     const inicioHoje = inicioDoDiaBR();
 
     const [
@@ -48,15 +56,18 @@ router.get('/resumo', async (req, res) => {
       numerosInvalidos,
       pendentes,
     ] = await Promise.all([
-      contar('clientes'),
-      contar('clientes', { pdf_url: { op: 'not_null' } }),
-      contar('envio_itens', { enviado_em: { op: 'gte', valor: inicioHoje } }),
-      contar('envio_itens', { status: 'enviado' }),
-      contar('envio_itens', { status_entrega: { op: 'in', valores: ['entregue', 'lido'] } }),
-      contar('envio_itens', { status_entrega: 'lido' }),
-      contar('envio_itens', { status: 'erro' }),
-      contar('envio_itens', { status: 'numero_invalido' }),
-      contar('envio_itens', { status: 'pendente' }),
+      contar('clientes', usuarioId),
+      // [2026-08] pdf_url é coluna deprecated e não é mais gravada (bucket
+      // privado, ver migration-12) -- o filtro certo pra "cliente tem PDF" é
+      // pdf_path, que continua sendo a fonte da verdade.
+      contar('clientes', usuarioId, { pdf_path: { op: 'not_null' } }),
+      contar('envio_itens', usuarioId, { enviado_em: { op: 'gte', valor: inicioHoje } }, { viaEnvios: true }),
+      contar('envio_itens', usuarioId, { status: 'enviado' }, { viaEnvios: true }),
+      contar('envio_itens', usuarioId, { status_entrega: { op: 'in', valores: ['entregue', 'lido'] } }, { viaEnvios: true }),
+      contar('envio_itens', usuarioId, { status_entrega: 'lido' }, { viaEnvios: true }),
+      contar('envio_itens', usuarioId, { status: 'erro' }, { viaEnvios: true }),
+      contar('envio_itens', usuarioId, { status: 'numero_invalido' }, { viaEnvios: true }),
+      contar('envio_itens', usuarioId, { status: 'pendente' }, { viaEnvios: true }),
     ]);
 
     res.json({

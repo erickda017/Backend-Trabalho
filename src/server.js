@@ -2,11 +2,12 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 
-import { startWhatsApp } from './services/whatsapp.js';
+import { startWhatsApp, iniciarLimpezaSessoesInativas } from './services/whatsapp.js';
 import { iniciarScheduler } from './services/scheduler.js';
 import { recuperarEnviosTravados } from './services/dispatchQueue.js';
 import { iniciarLimpezaAutomatica } from './services/limpezaAutomatica.js';
 import { requireAuth } from './middleware/auth.js';
+import { requireSupervisor } from './middleware/supervisor.js';
 import whatsappRoutes from './routes/whatsapp.routes.js';
 import clientesRoutes from './routes/clientes.routes.js';
 import enviosRoutes from './routes/envios.routes.js';
@@ -19,6 +20,8 @@ import configuracoesRoutes from './routes/configuracoes.routes.js';
 import pixRoutes from './routes/pix.routes.js';
 import faturasRoutes from './routes/faturas.routes.js';
 import boletosRoutes from './routes/boletos.routes.js';
+import perfilRoutes from './routes/perfil.routes.js';
+import supervisorRoutes from './routes/supervisor.routes.js';
 
 dotenv.config();
 
@@ -46,9 +49,30 @@ process.on('unhandledRejection', (reason) => {
 
 const app = express();
 
+// [2026-08] SEGURANÇA: em produção, CORS aberto (origin: true, libera
+// QUALQUER site) nunca é aceitável -- basta esquecer de configurar
+// FRONTEND_ORIGIN no Render (fácil de acontecer num deploy apressado) pra
+// qualquer site na internet poder chamar a API em nome de quem estiver
+// logado no painel (o navegador da vítima manda o cookie/token normalmente).
+// `RENDER` é injetada automaticamente pela plataforma em todo deploy lá --
+// não depende de configurarmos NODE_ENV manualmente, então não tem como
+// esquecer de marcar "isso é produção".
+const emProducao = Boolean(process.env.RENDER) || process.env.NODE_ENV === 'production';
 const origensPermitidas = process.env.FRONTEND_ORIGIN
   ? process.env.FRONTEND_ORIGIN.split(',').map((o) => o.trim())
-  : true; // sem restrição em dev, se a env var não estiver setada
+  : emProducao
+    ? [] // produção sem FRONTEND_ORIGIN configurada: bloqueia todo CORS (fail-safe) em vez de liberar geral
+    : true; // dev local sem a env var: sem restrição, pra não travar quem tá rodando na máquina
+
+if (emProducao && !process.env.FRONTEND_ORIGIN) {
+  console.error(
+    '[server] ERRO DE CONFIGURAÇÃO: rodando em produção (RENDER/NODE_ENV=production) sem ' +
+      'FRONTEND_ORIGIN definida. CORS está BLOQUEADO para todas as origens até essa variável ' +
+      'ser configurada (Render → Environment → FRONTEND_ORIGIN=https://seu-frontend.vercel.app). ' +
+      'Isso é intencional: liberar CORS geral em produção deixaria a API vulnerável a qualquer ' +
+      'site chamando em nome de um usuário logado.'
+  );
+}
 
 app.use(cors({ origin: origensPermitidas }));
 // Limite maior que o default (100kb) por causa da importação client-side
@@ -77,6 +101,8 @@ app.use('/api/faturas', requireAuth, faturasRoutes);
 // Worker no navegador -- ver boletos.routes.js). Fica junto do CORS acima,
 // que já libera a origem do front (FRONTEND_ORIGIN).
 app.use('/api/boletos', requireAuth, boletosRoutes);
+app.use('/api/perfil', requireAuth, perfilRoutes);
+app.use('/api/supervisor', requireAuth, requireSupervisor, supervisorRoutes);
 
 // Handler de erro global -- sem isso, erros como multer (arquivo grande demais, tipo
 // errado) ou qualquer exceção síncrona em uma rota caem no handler padrão do Express,
@@ -98,6 +124,7 @@ const server = app.listen(PORT, () => {
   );
   iniciarScheduler();
   iniciarLimpezaAutomatica();
+  iniciarLimpezaSessoesInativas();
   recuperarEnviosTravados().catch((err) =>
     console.error('[server] falha ao recuperar envios travados:', err.message || err)
   );

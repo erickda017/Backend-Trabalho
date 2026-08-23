@@ -3,7 +3,7 @@ import multer from 'multer';
 import XLSX from 'xlsx';
 import { processarImportacaoLotePronto } from '../services/importLote.js';
 import { normalizarTelefone } from '../lib/telefone.js';
-import { supabase, BUCKET } from '../lib/supabase.js';
+import { supabase, BUCKET, gerarSignedUrl } from '../lib/supabase.js';
 
 const router = Router();
 
@@ -61,10 +61,17 @@ function caminhoSeguro(caminho) {
 router.post('/upload-pdf', uploadPdfComTratamentoDeErro, async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
-    const caminho = caminhoSeguro(req.body?.caminho);
-    if (!caminho) {
+    const caminhoRelativo = caminhoSeguro(req.body?.caminho);
+    if (!caminhoRelativo) {
       return res.status(400).json({ error: 'campo "caminho" é obrigatório e não pode conter ".." ou caracteres inválidos' });
     }
+
+    // [2026-08] MULTI-TENANT: prefixa com o usuario_id no BACKEND, nunca
+    // confiando no que o navegador mandou em "caminho" pra isso -- sem esse
+    // prefixo, dois operadores com um cliente de mesmo telefone escreveriam
+    // no mesmo object key do bucket (o path que o front monta é só
+    // `${telefone}/...`), um PDF sobrescrevendo o do outro silenciosamente.
+    const caminho = `${req.user.id}/${caminhoRelativo}`;
 
     const { error: uploadError } = await supabase.storage
       .from(BUCKET)
@@ -72,9 +79,15 @@ router.post('/upload-pdf', uploadPdfComTratamentoDeErro, async (req, res) => {
 
     if (uploadError) return res.status(500).json({ error: uploadError.message });
 
-    const { data: publicUrlData } = supabase.storage.from(BUCKET).getPublicUrl(caminho);
+    // [2026-08] SEGURANÇA: bucket privado -- não existe mais URL pública.
+    // Devolvemos `path` (o que o navegador vai gravar em pdf_path no lote,
+    // ver frontend/src/lib/importacaoBrowser.ts) e, como conveniência pro
+    // navegador poder mostrar uma prévia/confirmação imediata do PDF
+    // recém-enviado, uma signed URL de curta duração -- ela NUNCA é gravada
+    // em lugar nenhum, só serve pra essa resposta.
+    const signedUrl = await gerarSignedUrl(BUCKET, caminho);
 
-    res.status(201).json({ path: caminho, publicUrl: publicUrlData.publicUrl });
+    res.status(201).json({ path: caminho, signedUrl });
   } catch (err) {
     console.error('[importacao] erro no upload-pdf:', err);
     res.status(500).json({ error: err.message });
@@ -166,6 +179,7 @@ router.post('/lote', async (req, res) => {
       linhasSemDados,
       templateMensagemPadrao,
       lote: typeof lote === 'string' ? lote.trim().slice(0, 120) || null : null,
+      usuarioId: req.user.id,
     });
 
     res.status(201).json(resultado);

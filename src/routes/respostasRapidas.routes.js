@@ -3,6 +3,9 @@ import { supabase } from '../lib/supabase.js';
 
 const router = Router();
 
+// [2026-08] MULTI-TENANT: respostas rápidas são por usuário -- cada operador
+// tem seu próprio conjunto de atalhos (único por usuário, não globalmente).
+
 // Tira a barra "/" que o usuário pode digitar por hábito -- guardamos só "boasvindas",
 // não "/boasvindas", pra não depender de como o front formata na hora de mostrar.
 function limparAtalho(atalho) {
@@ -10,7 +13,7 @@ function limparAtalho(atalho) {
 }
 
 router.get('/', async (req, res) => {
-  const { data, error } = await supabase.from('respostas_rapidas').select('*').order('atalho');
+  const { data, error } = await supabase.from('respostas_rapidas').select('*').eq('usuario_id', req.user.id).order('atalho');
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
@@ -23,7 +26,7 @@ router.post('/', async (req, res) => {
 
   const { data, error } = await supabase
     .from('respostas_rapidas')
-    .insert({ atalho, texto })
+    .insert({ usuario_id: req.user.id, atalho, texto })
     .select()
     .single();
 
@@ -43,16 +46,18 @@ router.put('/:id', async (req, res) => {
     .from('respostas_rapidas')
     .update({ ...(atalho ? { atalho } : {}), ...(texto ? { texto } : {}) })
     .eq('id', id)
+    .eq('usuario_id', req.user.id)
     .select()
-    .single();
+    .maybeSingle();
 
   if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Resposta rápida não encontrada' });
   res.json(data);
 });
 
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
-  const { error } = await supabase.from('respostas_rapidas').delete().eq('id', id);
+  const { error } = await supabase.from('respostas_rapidas').delete().eq('id', id).eq('usuario_id', req.user.id);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ ok: true });
 });

@@ -2,6 +2,7 @@
 
 create table if not exists clientes (
   id uuid primary key default gen_random_uuid(),
+  usuario_id uuid references auth.users(id) on delete cascade, -- dono (operador) deste cliente -- ver migration-13
   nome text not null,
   telefone text not null,
   valor numeric,
@@ -15,6 +16,7 @@ create table if not exists clientes (
 
 create table if not exists envios (
   id uuid primary key default gen_random_uuid(),
+  usuario_id uuid references auth.users(id) on delete cascade, -- dono (operador) deste envio -- ver migration-13
   template_mensagem text not null,
   status text not null default 'pendente', -- pendente | agendado | em_andamento | pausado | concluido | cancelado
   agendado_para timestamptz, -- se preenchido, o envio só começa automaticamente nesse horário
@@ -38,13 +40,20 @@ create table if not exists envio_itens (
   created_at timestamptz default now()
 );
 
--- Bucket de storage para os PDFs das faturas (criar manualmente em Storage também funciona)
+-- Bucket de storage para os PDFs das faturas (criar manualmente em Storage também funciona).
+-- PRIVADO de propósito: os PDFs têm dados pessoais do cliente (nome, endereço,
+-- CPF impresso no boleto). Leitura só via Signed URL de curta duração gerada
+-- pelo backend autenticado (ver src/lib/supabase.js: gerarSignedUrl) -- nunca
+-- getPublicUrl(). Se o bucket já existir como público de uma versão anterior
+-- deste arquivo, rode migration-12-seguranca-buckets-privados.sql.
 insert into storage.buckets (id, name, public)
-values ('faturas', 'faturas', true)
-on conflict (id) do nothing;
+values ('faturas', 'faturas', false)
+on conflict (id) do update set public = false;
 
--- telefone único: permite "upsert" ao reimportar planilha (atualiza em vez de duplicar)
-create unique index if not exists clientes_telefone_key on clientes (telefone);
+-- telefone único POR USUÁRIO: permite "upsert" ao reimportar planilha (atualiza
+-- em vez de duplicar), mas dois usuários diferentes podem ter, cada um, um
+-- cliente com o mesmo telefone (carteiras isoladas -- ver migration-13)
+create unique index if not exists clientes_usuario_telefone_key on clientes (usuario_id, telefone);
 
 -- índices para acelerar consultas de histórico e limite diário
 create index if not exists envio_itens_cliente_id_idx on envio_itens (cliente_id);
@@ -77,12 +86,26 @@ create index if not exists envios_pausado_retomar_em_idx on envios (retomar_em) 
 --        else regexp_replace(telefone, '\D', '', 'g') end
 -- );
 
--- Habilita RLS (recomendado já que agora existe login). Como o backend usa a
--- service_role key, ele ignora RLS -- essas políticas só protegem se alguém
--- tentar acessar o banco direto com a chave anônima/pública.
+-- Habilita RLS. Cada usuário só vê/edita seus próprios dados (policies logo
+-- abaixo) -- o backend usa a service_role key e ignora RLS de qualquer forma,
+-- mas as policies protegem como defesa em profundidade (um bug numa rota que
+-- esqueça de filtrar por usuario_id não vaza dado de outro usuário, porque o
+-- Postgres barra mesmo assim pra quem acessa com JWT de usuário comum).
 alter table clientes enable row level security;
 alter table envios enable row level security;
 alter table envio_itens enable row level security;
+
+drop policy if exists "dono ve seus clientes" on clientes;
+create policy "dono ve seus clientes" on clientes for all to authenticated
+  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+
+drop policy if exists "dono ve seus envios" on envios;
+create policy "dono ve seus envios" on envios for all to authenticated
+  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+
+drop policy if exists "dono ve seus envio_itens" on envio_itens;
+create policy "dono ve seus envio_itens" on envio_itens for all to authenticated
+  using (envio_id in (select id from envios where usuario_id = auth.uid()));
 
 -- Sessão do WhatsApp (Baileys), no lugar do antigo diretório em disco
 -- (WHATSAPP_SESSION_PATH). Cada linha guarda uma "chave" da sessão -- creds e
@@ -101,11 +124,12 @@ create table if not exists whatsapp_sessions (
 -- ==========================================================================
 create table if not exists tags (
   id uuid primary key default gen_random_uuid(),
+  usuario_id uuid references auth.users(id) on delete cascade, -- dono -- ver migration-13
   nome text not null,
   cor text not null default '#6366f1',
   created_at timestamptz default now()
 );
-create unique index if not exists tags_nome_key on tags (lower(nome));
+create unique index if not exists tags_usuario_nome_key on tags (usuario_id, lower(nome));
 
 create table if not exists cliente_tags (
   cliente_id uuid not null references clientes(id) on delete cascade,
@@ -120,15 +144,28 @@ create index if not exists cliente_tags_tag_id_idx on cliente_tags (tag_id);
 -- ==========================================================================
 create table if not exists respostas_rapidas (
   id uuid primary key default gen_random_uuid(),
+  usuario_id uuid references auth.users(id) on delete cascade, -- dono -- ver migration-13
   atalho text not null,
   texto text not null,
   created_at timestamptz default now()
 );
-create unique index if not exists respostas_rapidas_atalho_key on respostas_rapidas (lower(atalho));
+create unique index if not exists respostas_rapidas_usuario_atalho_key on respostas_rapidas (usuario_id, lower(atalho));
 
 alter table tags enable row level security;
 alter table cliente_tags enable row level security;
 alter table respostas_rapidas enable row level security;
+
+drop policy if exists "dono ve suas tags" on tags;
+create policy "dono ve suas tags" on tags for all to authenticated
+  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+
+drop policy if exists "dono ve suas cliente_tags" on cliente_tags;
+create policy "dono ve suas cliente_tags" on cliente_tags for all to authenticated
+  using (cliente_id in (select id from clientes where usuario_id = auth.uid()));
+
+drop policy if exists "dono ve suas respostas_rapidas" on respostas_rapidas;
+create policy "dono ve suas respostas_rapidas" on respostas_rapidas for all to authenticated
+  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
 
 -- Só o backend (service_role) acessa essa tabela, então RLS fica travado por padrão.
 alter table whatsapp_sessions enable row level security;
@@ -139,7 +176,8 @@ alter table whatsapp_sessions enable row level security;
 
 create table if not exists conversas (
   id uuid primary key default gen_random_uuid(),
-  telefone text not null unique, -- normalizado (dígitos + código do país)
+  usuario_id uuid references auth.users(id) on delete cascade, -- dono (operador) desta conversa -- ver migration-13
+  telefone text not null, -- normalizado (dígitos + código do país)
   cliente_id uuid references clientes(id) on delete set null, -- linkado por telefone quando existe
   nome_contato text, -- nome do WhatsApp (pushName) ou do cliente, o que tiver
   nao_lidas integer not null default 0,
@@ -151,6 +189,9 @@ create table if not exists conversas (
   numero_nao_confirmado boolean not null default false,
   created_at timestamptz default now()
 );
+-- telefone único POR USUÁRIO (cada operador tem seu próprio WhatsApp/carteira
+-- de contatos -- ver migration-13)
+create unique index if not exists conversas_usuario_telefone_key on conversas (usuario_id, telefone);
 
 create table if not exists mensagens (
   id uuid primary key default gen_random_uuid(),
@@ -158,7 +199,8 @@ create table if not exists mensagens (
   direcao text not null, -- entrada (cliente -> nós) | saida (nós -> cliente)
   tipo text not null default 'texto', -- texto | imagem | audio | documento
   texto text,
-  anexo_url text,
+  anexo_url text, -- deprecated: não gravar URL aqui, ver comment on column abaixo
+  anexo_path text, -- path no bucket chat-midia (privado) -- fonte da verdade, assinado sob demanda
   anexo_nome text,
   message_id text, -- id da mensagem no WhatsApp (Baileys) -- casa com o webhook de status de entrega
   status_entrega text, -- enviado | entregue | lido
@@ -183,10 +225,11 @@ create index if not exists conversas_ultima_mensagem_em_idx on conversas (ultima
 -- ecoa essa mesma mensagem de volta (fromMe: true), o upsert por message_id ignora.
 create unique index if not exists mensagens_message_id_key on mensagens (message_id) where message_id is not null;
 
--- Bucket de storage para mídia do chat (fotos/áudios/documentos)
+-- Bucket de storage para mídia do chat (fotos/áudios/documentos).
+-- PRIVADO de propósito -- mesma razão do bucket "faturas" acima.
 insert into storage.buckets (id, name, public)
-values ('chat-midia', 'chat-midia', true)
-on conflict (id) do nothing;
+values ('chat-midia', 'chat-midia', false)
+on conflict (id) do update set public = false;
 
 -- Só o backend (service_role) escreve. Front lê/assina via Realtime autenticado.
 alter table conversas enable row level security;
@@ -194,17 +237,13 @@ alter table mensagens enable row level security;
 
 -- create policy não tem "if not exists" no Postgres, por isso o drop antes
 -- (padrão idempotente, igual o resto deste arquivo)
-drop policy if exists "usuarios autenticados leem conversas" on conversas;
-create policy "usuarios autenticados leem conversas"
-  on conversas for select
-  to authenticated
-  using (true);
+drop policy if exists "dono ve suas conversas" on conversas;
+create policy "dono ve suas conversas" on conversas for all to authenticated
+  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
 
-drop policy if exists "usuarios autenticados leem mensagens" on mensagens;
-create policy "usuarios autenticados leem mensagens"
-  on mensagens for select
-  to authenticated
-  using (true);
+drop policy if exists "dono ve suas mensagens" on mensagens;
+create policy "dono ve suas mensagens" on mensagens for all to authenticated
+  using (conversa_id in (select id from conversas where usuario_id = auth.uid()));
 
 -- Habilita Realtime (INSERT/UPDATE) nessas duas tabelas -- é isso que o front escuta
 -- via supabase.channel(...).on('postgres_changes', ...) pra atualizar sem F5.
@@ -221,3 +260,29 @@ begin
   alter publication supabase_realtime add table mensagens;
 exception when duplicate_object then null;
 end $$;
+
+-- ==========================================================================
+-- Auditoria de exclusões (LGPD: rastreabilidade de operações sobre dados
+-- pessoais). Só o backend (service_role) escreve/lê -- RLS habilitado e
+-- SEM policies, então nem a anon key nem um JWT de usuário autenticado
+-- conseguem acessar essa tabela.
+-- ==========================================================================
+create table if not exists auditoria_exclusoes (
+  id uuid primary key default gen_random_uuid(),
+  entidade text not null,            -- 'cliente' | 'pdf_fatura' | 'conversa' | 'boleto_pix'
+  entidade_id text not null,         -- id (uuid) ou path do recurso removido
+  usuario_id uuid,                   -- auth.users.id de quem executou a ação
+  usuario_email text,                -- snapshot do email (sobrevive à remoção do usuário)
+  detalhes jsonb,                    -- payload livre: nome do cliente, telefone, path do storage etc.
+  criado_em timestamptz not null default now()
+);
+create index if not exists auditoria_exclusoes_entidade_idx on auditoria_exclusoes (entidade, criado_em desc);
+create index if not exists auditoria_exclusoes_usuario_idx on auditoria_exclusoes (usuario_id, criado_em desc);
+alter table auditoria_exclusoes enable row level security;
+
+comment on column clientes.pdf_url is
+  'Deprecated: não gravar URL aqui. A API sempre responde com uma signed URL calculada '
+  'na hora (ver gerarSignedUrl em src/lib/supabase.js), usando clientes.pdf_path como fonte da verdade.';
+comment on column mensagens.anexo_url is
+  'Deprecated: não gravar URL aqui. A API sempre responde com uma signed URL calculada '
+  'na hora, usando mensagens.anexo_path como fonte da verdade.';

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
+import { propagarDadosFatura } from '../lib/faturaPropagacao.js';
 
 // [2026-08] Rota nova do fluxo "boleto avulso": o PDF inteiro NUNCA chega aqui.
 // O navegador fatia o PDF (pdf-lib), manda cada página pro Cloudflare Worker
@@ -21,9 +22,11 @@ function pixCopiaColaValido(valor) {
 // Tenta casar o boleto com um cliente já cadastrado: 1) clienteId explícito
 // (quando o usuário já vinculou na tela), 2) por fallback, pelo nome do
 // arquivo -- mesmo critério usado no resto do sistema (ver pix.routes.js).
-async function resolverCliente({ clienteId, arquivo }) {
+// [2026-08] MULTI-TENANT: sempre escopado por usuarioId -- nunca casa/edita
+// um cliente que não seja do operador autenticado.
+async function resolverCliente({ clienteId, arquivo, usuarioId }) {
   if (clienteId) {
-    const { data } = await supabase.from('clientes').select('id').eq('id', clienteId).maybeSingle();
+    const { data } = await supabase.from('clientes').select('id').eq('id', clienteId).eq('usuario_id', usuarioId).maybeSingle();
     if (data?.id) return data.id;
   }
   if (arquivo) {
@@ -32,6 +35,7 @@ async function resolverCliente({ clienteId, arquivo }) {
       const { data } = await supabase
         .from('clientes')
         .select('id')
+        .eq('usuario_id', usuarioId)
         .ilike('nome', `%${escaparFiltroPostgrest(nomeBase)}%`)
         .limit(1)
         .maybeSingle();
@@ -60,6 +64,7 @@ function serializar(linha) {
 // POST /api/boletos/salvar-pix
 // Body: { pixCopiaCola, valor?, vencimento?, linhaDigitavel?, arquivo?, clienteId? }
 router.post('/salvar-pix', async (req, res) => {
+  const usuarioId = req.user.id;
   const { pixCopiaCola, valor, vencimento, linhaDigitavel, arquivo, clienteId } = req.body || {};
 
   if (!pixCopiaColaValido(pixCopiaCola)) {
@@ -68,13 +73,14 @@ router.post('/salvar-pix', async (req, res) => {
 
   try {
     const nomeArquivo = typeof arquivo === 'string' && arquivo.trim() ? arquivo.trim() : 'boleto.pdf';
-    const clienteResolvido = await resolverCliente({ clienteId, arquivo: nomeArquivo });
+    const clienteResolvido = await resolverCliente({ clienteId, arquivo: nomeArquivo, usuarioId });
 
     // Guarda o histórico da extração (auditoria/listagem em /pix) -- mesma
     // tabela usada pelo restante do extrator de Pix.
     const { data: extracao, error: insertError } = await supabase
       .from('pix_extracoes')
       .insert({
+        usuario_id: usuarioId,
         arquivo: nomeArquivo,
         cliente_id: clienteResolvido,
         status: 'encontrado',
@@ -89,17 +95,16 @@ router.post('/salvar-pix', async (req, res) => {
     if (insertError) return res.status(500).json({ error: insertError.message });
 
     // Se já achamos (ou o front já sabia) o cliente, grava a chave Pix + os
-    // dados do boleto direto nele também -- é o que os disparos usam de fato.
+    // dados do boleto direto nele também -- é o que os disparos usam de
+    // fato. Propaga pra outros números vinculados do mesmo cliente, se
+    // houver (ver lib/faturaPropagacao.js).
     if (clienteResolvido) {
-      const { error: updateError } = await supabase
-        .from('clientes')
-        .update({
-          pix_code: pixCopiaCola,
-          ...(valor ? { valor } : {}),
-          ...(vencimento ? { vencimento } : {}),
-          ...(linhaDigitavel ? { linha_digitavel: linhaDigitavel } : {}),
-        })
-        .eq('id', clienteResolvido);
+      const { error: updateError } = await propagarDadosFatura(clienteResolvido, usuarioId, {
+        pix_code: pixCopiaCola,
+        ...(valor ? { valor } : {}),
+        ...(vencimento ? { vencimento } : {}),
+        ...(linhaDigitavel ? { linha_digitavel: linhaDigitavel } : {}),
+      });
       if (updateError) console.error('[boletos] falha ao atualizar cliente com o Pix:', updateError.message);
     }
 

@@ -3,70 +3,149 @@ import { supabase } from '../lib/supabase.js';
 
 const router = Router();
 
-// Lista todas as tags
+// Cancela (status -> 'cancelado') os itens ainda `pendente` dos clientes
+// informados, em qualquer envio do usuário que não esteja concluído ou já
+// cancelado -- é o "sai dos lotes atual e futuros" quando uma tag
+// `permite_disparo: false` (ex.: Pago/Cancelado) é aplicada a um cliente.
+// "Futuros" é garantido à parte, filtrando em resolverClienteIds
+// (envios.routes.js) na hora de montar um lote novo; aqui só cuidamos do
+// que já está em andamento/pendente.
+async function cancelarItensPendentesDosClientes(clienteIds, usuarioId) {
+  if (!clienteIds || !clienteIds.length) return;
+
+  const { data: envios } = await supabase
+    .from('envios')
+    .select('id')
+    .eq('usuario_id', usuarioId)
+    .not('status', 'in', '(concluido,cancelado)');
+
+  const envioIds = (envios || []).map((e) => e.id);
+  if (!envioIds.length) return;
+
+  await supabase
+    .from('envio_itens')
+    .update({ status: 'cancelado' })
+    .in('envio_id', envioIds)
+    .in('cliente_id', clienteIds)
+    .eq('status', 'pendente');
+}
+
+// [2026-08] MULTI-TENANT: tags são por usuário -- cada operador tem seu
+// próprio conjunto (nome único por usuário, não globalmente -- ver
+// migration-13-multi-tenant.sql).
+
+// Lista todas as tags do usuário logado
 router.get('/', async (req, res) => {
-  const { data, error } = await supabase.from('tags').select('*').order('nome');
+  const { data, error } = await supabase.from('tags').select('*').eq('usuario_id', req.user.id).order('nome');
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
 
-// Cria uma tag nova
+// Cria uma tag nova. `permite_disparo: false` marca a tag como "tira do
+// disparo" (ex.: Pago, Cancelado) -- ver migration-14 pro efeito completo.
 router.post('/', async (req, res) => {
-  const { nome, cor } = req.body || {};
+  const { nome, cor, permite_disparo } = req.body || {};
   if (!nome || !nome.trim()) return res.status(400).json({ error: 'nome é obrigatório' });
 
   const { data, error } = await supabase
     .from('tags')
-    .insert({ nome: nome.trim(), cor: cor || '#6366f1' })
+    .insert({
+      usuario_id: req.user.id,
+      nome: nome.trim(),
+      cor: cor || '#6366f1',
+      permite_disparo: permite_disparo === false ? false : true,
+    })
     .select()
     .single();
 
   if (error) {
-    // unique index em lower(nome) -- evita "Cliente VIP" e "cliente vip" como tags diferentes
+    // unique index em (usuario_id, lower(nome)) -- evita "Cliente VIP" e "cliente vip"
+    // como tags diferentes na carteira do MESMO usuário (dois usuários diferentes
+    // podem, cada um, ter uma tag "VIP" -- isso é esperado, não colide).
     if (error.code === '23505') return res.status(409).json({ error: 'Já existe uma tag com esse nome' });
     return res.status(500).json({ error: error.message });
   }
   res.status(201).json(data);
 });
 
-// Atualiza nome/cor de uma tag
+// Atualiza nome/cor/permite_disparo de uma tag. Se a tag passar a
+// `permite_disparo: false` (ex.: usuário edita "Em atraso" pra virar
+// "Cancelado" e liga o toggle depois), aplica o mesmo efeito de saída dos
+// lotes pra todo mundo que já tem essa tag -- não é só quem for marcado
+// dali pra frente.
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { nome, cor } = req.body || {};
+  const { nome, cor, permite_disparo } = req.body || {};
+  const usuarioId = req.user.id;
 
   const { data, error } = await supabase
     .from('tags')
-    .update({ ...(nome ? { nome: nome.trim() } : {}), ...(cor ? { cor } : {}) })
+    .update({
+      ...(nome ? { nome: nome.trim() } : {}),
+      ...(cor ? { cor } : {}),
+      ...(typeof permite_disparo === 'boolean' ? { permite_disparo } : {}),
+    })
     .eq('id', id)
+    .eq('usuario_id', usuarioId)
     .select()
-    .single();
+    .maybeSingle();
 
   if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Tag não encontrada' });
+
+  if (permite_disparo === false) {
+    const { data: relacoes } = await supabase.from('cliente_tags').select('cliente_id').eq('tag_id', id);
+    await cancelarItensPendentesDosClientes((relacoes || []).map((r) => r.cliente_id), usuarioId);
+  }
+
   res.json(data);
 });
 
 // Remove uma tag (cliente_tags cai em cascata -- ver schema)
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
-  const { error } = await supabase.from('tags').delete().eq('id', id);
+  const { error } = await supabase.from('tags').delete().eq('id', id).eq('usuario_id', req.user.id);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ ok: true });
 });
 
-// Atribui uma tag a um cliente
+// Atribui uma tag a um cliente -- confirma que TANTO a tag QUANTO o cliente
+// são do usuário logado antes de criar a relação (senão daria pra "vazar" uma
+// tag/cliente de outro usuário criando uma linha em cliente_tags cruzando os dois).
 router.post('/:id/clientes/:clienteId', async (req, res) => {
   const { id, clienteId } = req.params;
+  const usuarioId = req.user.id;
+
+  const [{ data: tag }, { data: cliente }] = await Promise.all([
+    supabase.from('tags').select('id, permite_disparo').eq('id', id).eq('usuario_id', usuarioId).maybeSingle(),
+    supabase.from('clientes').select('id').eq('id', clienteId).eq('usuario_id', usuarioId).maybeSingle(),
+  ]);
+  if (!tag || !cliente) return res.status(404).json({ error: 'Tag ou cliente não encontrado' });
+
   const { error } = await supabase
     .from('cliente_tags')
     .upsert({ tag_id: id, cliente_id: clienteId }, { onConflict: 'cliente_id,tag_id' });
 
   if (error) return res.status(500).json({ error: error.message });
+
+  // Tag "tira do disparo" (ex.: Pago, Cancelado) -- some imediatamente de
+  // qualquer lote em andamento/pendente, não só dos próximos que forem
+  // montados.
+  if (tag.permite_disparo === false) {
+    await cancelarItensPendentesDosClientes([clienteId], usuarioId);
+  }
+
   res.status(201).json({ ok: true });
 });
 
 // Remove uma tag de um cliente
 router.delete('/:id/clientes/:clienteId', async (req, res) => {
   const { id, clienteId } = req.params;
+  const usuarioId = req.user.id;
+
+  const { data: cliente } = await supabase.from('clientes').select('id').eq('id', clienteId).eq('usuario_id', usuarioId).maybeSingle();
+  if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado' });
+
   const { error } = await supabase
     .from('cliente_tags')
     .delete()

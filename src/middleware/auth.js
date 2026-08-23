@@ -16,5 +16,27 @@ export async function requireAuth(req, res, next) {
   }
 
   req.user = data.user;
+
+  // Mantém `perfis` sempre com uma linha pra quem já logou alguma vez -- é
+  // o que permite promover a supervisor com um UPDATE simples (ver
+  // migration-16). upsert leve, roda em toda request autenticada; se falhar
+  // (rede, migration ainda não rodada) não derruba o login -- só trata como
+  // 'operador' (comportamento de sempre) e loga o erro.
+  try {
+    const { data: perfil, error: perfilError } = await supabase
+      .from('perfis')
+      .upsert(
+        { id: req.user.id, email: req.user.email || null },
+        { onConflict: 'id', ignoreDuplicates: false },
+      )
+      .select('role')
+      .single();
+    if (perfilError) throw perfilError;
+    req.user.role = perfil?.role || 'operador';
+  } catch (err) {
+    console.error('[auth] falha ao sincronizar perfil (seguindo como operador):', err.message);
+    req.user.role = 'operador';
+  }
+
   next();
 }

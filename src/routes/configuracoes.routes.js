@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { configEstrategiaCompleta, salvarEstrategia } from '../lib/estrategia.js';
 import { configDisparo } from '../services/dispatchQueue.js';
 
 const router = Router();
@@ -12,24 +11,10 @@ router.get('/disparo', (req, res) => {
   res.json(configDisparo());
 });
 
-router.get('/estrategia', async (req, res) => {
-  try {
-    res.json(await configEstrategiaCompleta());
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.put('/estrategia', async (req, res) => {
-  const { estrategia } = req.body || {};
-  if (!estrategia) return res.status(400).json({ error: 'estrategia é obrigatória' });
-
-  try {
-    await salvarEstrategia(estrategia);
-    res.json(await configEstrategiaCompleta());
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
+// [2026-08] MULTI-TENANT: rotas GET/PUT /estrategia removidas. Existiam pra
+// escolher entre 2 slots de WhatsApp de UMA operação compartilhada
+// (round-robin, slot fixo etc) -- agora cada usuário tem 1 WhatsApp só, não
+// há mais "estratégia" nenhuma pra configurar (ver migration-13-multi-tenant.sql,
+// tabela estrategia_config marcada como deprecated).
 
 export default router;

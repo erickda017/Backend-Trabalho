@@ -36,6 +36,7 @@ router.get('/', async (req, res) => {
   let query = supabase
     .from('pix_extracoes')
     .select('*, clientes(nome)', { count: 'exact' })
+    .eq('usuario_id', req.user.id)
     .order('criado_em', { ascending: false });
 
   if (busca) query = query.ilike('arquivo', `%${escaparFiltroPostgrest(busca)}%`);
@@ -51,6 +52,7 @@ router.get('/', async (req, res) => {
 // Grava o pix_code já extraído no cliente informado
 router.post('/:id/aplicar', async (req, res) => {
   const { id } = req.params;
+  const usuarioId = req.user.id;
   const { cliente_id } = req.body || {};
   if (!cliente_id) return res.status(400).json({ error: 'cliente_id é obrigatório' });
 
@@ -58,10 +60,14 @@ router.post('/:id/aplicar', async (req, res) => {
     .from('pix_extracoes')
     .select('pix_code, valor, vencimento, linha_digitavel')
     .eq('id', id)
+    .eq('usuario_id', usuarioId)
     .maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
   if (!linha) return res.status(404).json({ error: 'Extração não encontrada' });
   if (!linha.pix_code) return res.status(400).json({ error: 'Esta extração não tem um código Pix encontrado' });
+
+  const { data: donoCliente } = await supabase.from('clientes').select('id').eq('id', cliente_id).eq('usuario_id', usuarioId).maybeSingle();
+  if (!donoCliente) return res.status(404).json({ error: 'Cliente não encontrado' });
 
   const { error: updateError } = await supabase
     .from('clientes')
@@ -71,13 +77,15 @@ router.post('/:id/aplicar', async (req, res) => {
       ...(linha.vencimento ? { vencimento: linha.vencimento } : {}),
       ...(linha.linha_digitavel ? { linha_digitavel: linha.linha_digitavel } : {}),
     })
-    .eq('id', cliente_id);
+    .eq('id', cliente_id)
+    .eq('usuario_id', usuarioId);
   if (updateError) return res.status(500).json({ error: updateError.message });
 
   const { data: atualizada, error: selectError } = await supabase
     .from('pix_extracoes')
     .update({ cliente_id })
     .eq('id', id)
+    .eq('usuario_id', usuarioId)
     .select('*, clientes(nome)')
     .single();
   if (selectError) return res.status(500).json({ error: selectError.message });
@@ -90,6 +98,7 @@ router.get('/exportar', async (req, res) => {
   const { data, error } = await supabase
     .from('pix_extracoes')
     .select('*, clientes(nome)')
+    .eq('usuario_id', req.user.id)
     .order('criado_em', { ascending: false });
   if (error) return res.status(500).json({ error: error.message });
 

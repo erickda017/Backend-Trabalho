@@ -1,67 +1,32 @@
 import { Router } from 'express';
-import {
-  getStatus,
-  logoutWhatsApp,
-  listarConexoes,
-  getStatusSlot,
-  conectarSlot,
-  logoutSlot,
-  SLOTS,
-} from '../services/whatsapp.js';
+import { getStatusUsuario, conectarUsuario, logoutUsuario } from '../services/whatsapp.js';
 
 const router = Router();
 
-function validarSlot(req, res) {
-  const slot = Number(req.params.slot);
-  if (!SLOTS.includes(slot)) {
-    res.status(400).json({ error: 'slot inválido (use 1 ou 2)' });
-    return null;
-  }
-  return slot;
-}
+// [2026-08] MULTI-TENANT: não existe mais parâmetro de slot na URL -- a
+// conexão WhatsApp sempre se refere ao usuário autenticado (req.user.id,
+// preenchido pelo middleware requireAuth em server.js). Cada operador só
+// consegue ver/conectar/desconectar a PRÓPRIA sessão, nunca a de outro --
+// não tem como um usuário passar o id de outro aqui, porque o id nunca vem
+// do corpo da requisição, só do token JWT validado.
 
-// --- duas conexões independentes ------------------------------------------
-router.get('/conexoes', (req, res) => {
-  res.json(listarConexoes());
-});
-
-router.get('/conexoes/:slot/status', (req, res) => {
-  const slot = validarSlot(req, res);
-  if (slot === null) return;
-  res.json(getStatusSlot(slot));
-});
-
-router.post('/conexoes/:slot/conectar', async (req, res) => {
-  const slot = validarSlot(req, res);
-  if (slot === null) return;
-  try {
-    const estado = await conectarSlot(slot);
-    res.json(estado);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post('/conexoes/:slot/logout', async (req, res) => {
-  const slot = validarSlot(req, res);
-  if (slot === null) return;
-  try {
-    const estado = await logoutSlot(slot);
-    res.json(estado);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// --- compatibilidade legada (versão de conexão única) ----------------------
 router.get('/status', (req, res) => {
-  res.json(getStatus());
+  res.json(getStatusUsuario(req.user.id));
+});
+
+router.post('/conectar', async (req, res) => {
+  try {
+    const estado = await conectarUsuario(req.user.id);
+    res.json(estado);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.post('/logout', async (req, res) => {
   try {
-    await logoutWhatsApp();
-    res.json({ ok: true });
+    const estado = await logoutUsuario(req.user.id);
+    res.json(estado);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

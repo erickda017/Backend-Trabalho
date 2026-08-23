@@ -1,6 +1,5 @@
-import { supabase } from '../lib/supabase.js';
+import { supabase, BUCKET, gerarSignedUrl } from '../lib/supabase.js';
 import { enviarMensagemComPdf, enviarMensagemTexto, validarNumero, isConnected } from './whatsapp.js';
-import { escolherSlot } from '../lib/estrategia.js';
 import { dispararWebhook } from './webhook.js';
 import { registrarMensagemSaida } from './chatIngest.js';
 
@@ -20,20 +19,22 @@ const BATCH_PAUSE_MS = Number(process.env.BATCH_PAUSE_MS || 10 * 60 * 1000); // 
 // de continuar o loop e marcar CADA item restante como 'erro' um por um.
 const RECONEXAO_RETRY_MS = Number(process.env.RECONEXAO_RETRY_MS || 2 * 60 * 1000); // 2 min
 
-let isRunning = false;
-let contadorLote = 0;
-
-// Id do envio que está rodando NESTE processo agora (null se nenhum). Usado
-// pelas rotas de pausar/cancelar pra saber se dá pra sinalizar o loop em
-// memória (mais rápido, para entre um item e outro) ou se precisa mexer
-// direto no banco (caso o envio esteja 'em_andamento' só porque o processo
-// caiu no meio -- ver recuperarEnviosTravados).
-let envioAtualId = null;
-
-// Sinalizações de pausar/cancelar pedidas via API enquanto o loop de
-// processarDisparo está rodando. O loop confere isso a cada item enviado.
-const pauseRequests = new Set();
+// [2026-08] MULTI-TENANT: antes era 1 disparo por vez pro sistema INTEIRO
+// (variáveis de módulo simples). Agora cada usuário pode ter seu próprio
+// disparo rodando ao mesmo tempo -- todo o estado de execução vira um Map
+// indexado por usuarioId, do mesmo jeito que sessoes em whatsapp.js.
+const execucoes = new Map(); // usuarioId -> { isRunning, envioAtualId }
+const pauseRequests = new Set(); // guarda `${usuarioId}:${envioId}`
 const cancelRequests = new Set();
+
+function getExecucao(usuarioId) {
+  if (!execucoes.has(usuarioId)) execucoes.set(usuarioId, { isRunning: false, envioAtualId: null });
+  return execucoes.get(usuarioId);
+}
+
+function chaveRequest(usuarioId, envioId) {
+  return `${usuarioId}:${envioId}`;
+}
 
 // Brasil não observa horário de verão desde 2019 -- offset fixo -03:00.
 const OFFSET_BR = '-03:00';
@@ -80,14 +81,18 @@ export function escolherTemplate(envio) {
   return variacoes[indice];
 }
 
-// Conta quantas mensagens já foram enviadas hoje (considerando todos os envios)
-async function contarEnviadosHoje() {
+// Conta quantas mensagens já foram enviadas hoje POR ESTE USUÁRIO (o limite
+// diário é uma cota por operador -- cada um tem seu próprio WhatsApp e seu
+// próprio risco de bloqueio, não faz sentido mais uma cota global somando
+// todo mundo).
+async function contarEnviadosHoje(usuarioId) {
   const inicioDoDia = inicioDoDiaBR();
 
   const { count, error } = await supabase
     .from('envio_itens')
-    .select('*', { count: 'exact', head: true })
+    .select('*, envios!inner(usuario_id)', { count: 'exact', head: true })
     .eq('status', 'enviado')
+    .eq('envios.usuario_id', usuarioId)
     .gte('enviado_em', inicioDoDia.toISOString());
 
   if (error) throw error;
@@ -100,44 +105,47 @@ function proximaJanela() {
   return new Date(inicioHojeBR.getTime() + 24 * 60 * 60 * 1000);
 }
 
-async function enviarItem(item, envio) {
+async function enviarItem(item, envio, usuarioId) {
   const cliente = item.clientes;
   const templateDoItem = item.mensagem_override || escolherTemplate(envio);
-  const mensagem = montarMensagem(templateDoItem, cliente);
+  let mensagem = montarMensagem(templateDoItem, cliente);
 
-  // Escolhe o slot pra ESTA mensagem: slot fixo do envio, ou a estratégia
-  // configurada (round_robin alterna mensagem a mensagem entre os conectados).
-  let slotEscolhido;
-  try {
-    slotEscolhido = await escolherSlot(envio.slot);
-  } catch (err) {
-    await supabase.from('envio_itens').update({ status: 'erro', erro: err.message }).eq('id', item.id);
-    await dispararWebhook('erro_envio', { cliente, envio_id: envio.id, erro: err.message });
-    return;
+  // Lote "só Pix" (ver migration-17): nunca anexa o PDF, mesmo que o
+  // cliente tenha um. Se o template não usa a variável {{pix}}, gruda o
+  // código no fim da mensagem -- sem isso, um template sem a variável
+  // mandaria uma mensagem de texto genérica sem o Pix nenhum, o que
+  // inverteria o propósito do modo.
+  if (envio.enviar_pix && cliente.pix_code && !templateDoItem.includes('{{pix}}')) {
+    mensagem = `${mensagem}\n\nPix copia e cola:\n${cliente.pix_code}`;
   }
 
   try {
-    const { existe, jid } = await validarNumero(cliente.telefone, slotEscolhido);
+    const { existe, jid } = await validarNumero(cliente.telefone, usuarioId);
     if (!existe) {
       await supabase
         .from('envio_itens')
-        .update({ status: 'numero_invalido', erro: 'Número não encontrado no WhatsApp', slot: slotEscolhido })
+        .update({ status: 'numero_invalido', erro: 'Número não encontrado no WhatsApp' })
         .eq('id', item.id);
 
       await dispararWebhook('numero_invalido', { cliente, envio_id: envio.id });
       return;
     }
 
-    const { messageId, slot: slotUsado } = cliente.pdf_url
+    // Bucket privado: assina uma URL só pro Baileys baixar AGORA (curta
+    // duração) -- nunca reaproveita/persiste uma URL pública fixa.
+    // `envio.enviar_pix` força texto puro mesmo com PDF cadastrado.
+    const pdfUrlAssinada = !envio.enviar_pix && cliente.pdf_path ? await gerarSignedUrl(BUCKET, cliente.pdf_path) : null;
+
+    const { messageId } = pdfUrlAssinada
       ? await enviarMensagemComPdf({
           numero: cliente.telefone,
           jid,
           mensagem,
-          pdfUrl: cliente.pdf_url,
+          pdfUrl: pdfUrlAssinada,
           pdfNome: `fatura-${cliente.nome}.pdf`,
-          slot: slotEscolhido,
+          usuarioId,
         })
-      : await enviarMensagemTexto({ numero: cliente.telefone, jid, mensagem, slot: slotEscolhido });
+      : await enviarMensagemTexto({ numero: cliente.telefone, jid, mensagem, usuarioId });
 
     await supabase
       .from('envio_itens')
@@ -147,7 +155,6 @@ async function enviarItem(item, envio) {
         message_id: messageId,
         status_entrega: 'enviado',
         enviado_em: new Date().toISOString(),
-        slot: slotUsado,
       })
       .eq('id', item.id);
 
@@ -158,46 +165,48 @@ async function enviarItem(item, envio) {
       await registrarMensagemSaida({
         telefone: cliente.telefone,
         texto: mensagem,
-        tipo: cliente.pdf_url ? 'documento' : 'texto',
-        anexoUrl: cliente.pdf_url || null,
-        anexoNome: cliente.pdf_url ? `fatura-${cliente.nome}.pdf` : null,
+        tipo: pdfUrlAssinada ? 'documento' : 'texto',
+        anexoPath: pdfUrlAssinada ? cliente.pdf_path : null,
+        anexoNome: pdfUrlAssinada ? `fatura-${cliente.nome}.pdf` : null,
         messageId,
-        slot: slotUsado,
+        usuarioId,
       });
     } catch (chatErr) {
       console.error(`[dispatch] erro ao registrar no chat para ${cliente.nome}:`, chatErr.message);
     }
 
-    await dispararWebhook('mensagem_enviada', { cliente, envio_id: envio.id, message_id: messageId, slot: slotUsado });
+    await dispararWebhook('mensagem_enviada', { cliente, envio_id: envio.id, message_id: messageId });
   } catch (err) {
     console.error(`[dispatch] erro ao enviar para ${cliente.nome}:`, err.message);
-    await supabase
-      .from('envio_itens')
-      .update({ status: 'erro', erro: err.message, slot: slotEscolhido })
-      .eq('id', item.id);
+    await supabase.from('envio_itens').update({ status: 'erro', erro: err.message }).eq('id', item.id);
 
     await dispararWebhook('erro_envio', { cliente, envio_id: envio.id, erro: err.message });
   }
 }
 
 // Processa um disparo em lote: pega itens 'pendente' de um envio_id e dispara um a um.
-export async function processarDisparo(envioId) {
-  if (isRunning) {
-    throw new Error('Já existe um disparo em andamento. Aguarde finalizar.');
+// usuarioId é sempre o dono do envio (vem de req.user.id na rota) -- nunca do
+// corpo da requisição, pra não dar pra um usuário disparar um envio de outro.
+export async function processarDisparo(envioId, usuarioId) {
+  const execucao = getExecucao(usuarioId);
+  if (execucao.isRunning) {
+    throw new Error('Já existe um disparo seu em andamento. Aguarde finalizar.');
   }
-  isRunning = true;
-  envioAtualId = envioId;
+  execucao.isRunning = true;
+  execucao.envioAtualId = envioId;
+  let contadorLote = 0;
 
   try {
     const { data: envio, error: envioError } = await supabase
       .from('envios')
       .select('*')
       .eq('id', envioId)
+      .eq('usuario_id', usuarioId)
       .single();
 
     if (envioError || !envio) throw new Error('Envio não encontrado');
 
-    await supabase.from('envios').update({ status: 'em_andamento', retomar_em: null }).eq('id', envioId);
+    await supabase.from('envios').update({ status: 'em_andamento', retomar_em: null }).eq('id', envioId).eq('usuario_id', usuarioId);
     await dispararWebhook('disparo_iniciado', { envio_id: envioId });
 
     const { data: itens, error: itensError } = await supabase
@@ -223,21 +232,23 @@ export async function processarDisparo(envioId) {
         // Pausar/cancelar pedido via API (botão na aba Disparo/Histórico). Checado
         // no início de cada item -- nunca interrompe um envio já em voo, só evita
         // começar o próximo. Cancelar tem prioridade se os dois foram pedidos.
-        if (cancelRequests.has(envioId)) {
-          cancelRequests.delete(envioId);
-          pauseRequests.delete(envioId);
+        const chave = chaveRequest(usuarioId, envioId);
+        if (cancelRequests.has(chave)) {
+          cancelRequests.delete(chave);
+          pauseRequests.delete(chave);
           await supabase
             .from('envios')
             .update({ status: 'cancelado', finalizado_em: new Date().toISOString() })
-            .eq('id', envioId);
+            .eq('id', envioId)
+            .eq('usuario_id', usuarioId);
           await marcarItensPendentesComoCancelados(envioId);
           await dispararWebhook('disparo_cancelado', { envio_id: envioId });
           console.log(`[dispatch] disparo ${envioId} cancelado pelo usuário.`);
           return;
         }
-        if (pauseRequests.has(envioId)) {
-          pauseRequests.delete(envioId);
-          await supabase.from('envios').update({ status: 'pausado', retomar_em: null }).eq('id', envioId);
+        if (pauseRequests.has(chave)) {
+          pauseRequests.delete(chave);
+          await supabase.from('envios').update({ status: 'pausado', retomar_em: null }).eq('id', envioId).eq('usuario_id', usuarioId);
           await dispararWebhook('disparo_pausado_manual', { envio_id: envioId });
           console.log(`[dispatch] disparo ${envioId} pausado pelo usuário.`);
           return;
@@ -247,36 +258,37 @@ export async function processarDisparo(envioId) {
         // sessão derrubada), o loop continuava e marcava CADA item restante como
         // 'erro' um por um -- ainda esperando o delay normal entre eles -- em vez de
         // parar. Com 300 itens pendentes isso significava minutos/horas queimando a
-        // fila inteira em erro por nada. Agora, se não há conexão disponível pro slot
-        // que esse envio usa, pausa (fica 'pendente' pra tentar de novo) e o
-        // scheduler.js retoma sozinho quando -- e se -- a conexão voltar.
-        if (!isConnected(envio.slot)) {
+        // fila inteira em erro por nada. Agora, se este usuário não tem WhatsApp
+        // conectado, pausa (fica 'pendente' pra tentar de novo) e o scheduler.js
+        // retoma sozinho quando -- e se -- a conexão voltar.
+        if (!isConnected(usuarioId)) {
           const retomarEm = new Date(Date.now() + RECONEXAO_RETRY_MS);
           await supabase
             .from('envios')
             .update({ status: 'pausado', retomar_em: retomarEm.toISOString() })
-            .eq('id', envioId);
+            .eq('id', envioId)
+            .eq('usuario_id', usuarioId);
 
           await dispararWebhook('disparo_pausado_sem_conexao', {
             envio_id: envioId,
-            slot: envio.slot || null,
             retomar_em: retomarEm.toISOString(),
           });
 
           console.log(
-            `[dispatch] conexão WhatsApp indisponível (slot ${envio.slot || 'qualquer'}), pausando disparo ${envioId}. Retomando em ${retomarEm.toISOString()}`
+            `[dispatch] conexão WhatsApp indisponível (usuário ${usuarioId}), pausando disparo ${envioId}. Retomando em ${retomarEm.toISOString()}`
           );
           return;
         }
 
         if (DAILY_LIMIT > 0) {
-          const enviadosHoje = await contarEnviadosHoje();
+          const enviadosHoje = await contarEnviadosHoje(usuarioId);
           if (enviadosHoje >= DAILY_LIMIT) {
             const retomarEm = proximaJanela();
             await supabase
               .from('envios')
               .update({ status: 'pausado', retomar_em: retomarEm.toISOString() })
-              .eq('id', envioId);
+              .eq('id', envioId)
+              .eq('usuario_id', usuarioId);
 
             await dispararWebhook('disparo_pausado_limite_diario', {
               envio_id: envioId,
@@ -288,7 +300,7 @@ export async function processarDisparo(envioId) {
           }
         }
 
-        await enviarItem(item, envio);
+        await enviarItem(item, envio, usuarioId);
         contadorLote++;
 
         if (delayDaJanela != null) {
@@ -313,7 +325,8 @@ export async function processarDisparo(envioId) {
       await supabase
         .from('envios')
         .update({ status: 'pausado', retomar_em: retomarEm.toISOString() })
-        .eq('id', envioId);
+        .eq('id', envioId)
+        .eq('usuario_id', usuarioId);
 
       await dispararWebhook('disparo_erro_inesperado', {
         envio_id: envioId,
@@ -326,24 +339,26 @@ export async function processarDisparo(envioId) {
     await supabase
       .from('envios')
       .update({ status: 'concluido', finalizado_em: new Date().toISOString() })
-      .eq('id', envioId);
+      .eq('id', envioId)
+      .eq('usuario_id', usuarioId);
 
     await dispararWebhook('disparo_concluido', { envio_id: envioId });
   } finally {
-    isRunning = false;
-    envioAtualId = null;
+    execucao.isRunning = false;
+    execucao.envioAtualId = null;
     // Limpa qualquer pedido de pausar/cancelar que não chegou a ser consumido
     // (ex: pedido chegou depois do último item, ou o envio terminou/pausou por
     // outro motivo antes do loop checar de novo) -- não deixa "vazando" pro
     // próximo envio que vier a usar esse mesmo id (não deveria acontecer, mas
     // não custa garantir).
-    pauseRequests.delete(envioId);
-    cancelRequests.delete(envioId);
+    const chave = chaveRequest(usuarioId, envioId);
+    pauseRequests.delete(chave);
+    cancelRequests.delete(chave);
   }
 }
 
 // Reenvia apenas os itens que falharam (status 'erro') de um envio -- não mexe nos já enviados
-export async function reenviarErros(envioId) {
+export async function reenviarErros(envioId, usuarioId) {
   const { error } = await supabase
     .from('envio_itens')
     .update({ status: 'pendente', erro: null })
@@ -352,17 +367,18 @@ export async function reenviarErros(envioId) {
 
   if (error) throw error;
 
-  return processarDisparo(envioId);
+  return processarDisparo(envioId, usuarioId);
 }
 
-export function disparoEmAndamento() {
-  return isRunning;
+export function disparoEmAndamento(usuarioId) {
+  return getExecucao(usuarioId).isRunning;
 }
 
 // Id do envio rodando agora neste processo (null se nenhum) -- usado pelas
 // rotas pra decidir como aplicar pausar/cancelar.
-export function envioEmExecucaoId() {
-  return isRunning ? envioAtualId : null;
+export function envioEmExecucaoId(usuarioId) {
+  const execucao = getExecucao(usuarioId);
+  return execucao.isRunning ? execucao.envioAtualId : null;
 }
 
 // Configuração do disparo, pro frontend mostrar (ex: "pausa automática de 10min
@@ -384,9 +400,10 @@ export function configDisparo() {
 // (nunca no meio de um envio) e atualiza o status sozinho. Se não está
 // rodando aqui (ex: preso em 'em_andamento' de um processo anterior que
 // caiu, antes de recuperarEnviosTravados rodar), atualiza direto no banco.
-export async function solicitarPausa(envioId) {
-  if (isRunning && envioAtualId === envioId) {
-    pauseRequests.add(envioId);
+export async function solicitarPausa(envioId, usuarioId) {
+  const execucao = getExecucao(usuarioId);
+  if (execucao.isRunning && execucao.envioAtualId === envioId) {
+    pauseRequests.add(chaveRequest(usuarioId, envioId));
     return { status: 'pausando' };
   }
 
@@ -394,6 +411,7 @@ export async function solicitarPausa(envioId) {
     .from('envios')
     .update({ status: 'pausado', retomar_em: null })
     .eq('id', envioId)
+    .eq('usuario_id', usuarioId)
     .eq('status', 'em_andamento')
     .select('id')
     .maybeSingle();
@@ -408,9 +426,10 @@ export async function solicitarPausa(envioId) {
 // histórico continuavam contando como pendente algo que nunca mais vai ser
 // disparado). Não é retomável pelo scheduler nem pelo botão "Continuar
 // disparo" (status 'cancelado' não aparece nas condições deles).
-export async function solicitarCancelamento(envioId) {
-  if (isRunning && envioAtualId === envioId) {
-    cancelRequests.add(envioId);
+export async function solicitarCancelamento(envioId, usuarioId) {
+  const execucao = getExecucao(usuarioId);
+  if (execucao.isRunning && execucao.envioAtualId === envioId) {
+    cancelRequests.add(chaveRequest(usuarioId, envioId));
     return { status: 'cancelando' };
   }
 
@@ -418,6 +437,7 @@ export async function solicitarCancelamento(envioId) {
     .from('envios')
     .update({ status: 'cancelado', finalizado_em: new Date().toISOString() })
     .eq('id', envioId)
+    .eq('usuario_id', usuarioId)
     .in('status', ['em_andamento', 'pendente', 'pausado', 'agendado'])
     .select('id')
     .maybeSingle();

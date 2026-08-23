@@ -58,7 +58,7 @@ function interpretarConteudo(content) {
   return null; // reação, enquete, mensagem apagada, protocolo etc -- ignora
 }
 
-async function baixarEGuardarMidia(sock, waMessage, { mediaMsg, mimetype, fileName }, telefone, messageId) {
+async function baixarEGuardarMidia(sock, waMessage, { mediaMsg, mimetype, fileName }, telefone, messageId, usuarioId) {
   const buffer = await downloadMediaMessage(
     { message: mediaMsg, key: waMessage.key },
     'buffer',
@@ -66,15 +66,21 @@ async function baixarEGuardarMidia(sock, waMessage, { mediaMsg, mimetype, fileNa
     { logger, reuploadRequest: sock.updateMediaMessage }
   );
 
-  const caminho = `${telefone}/${messageId}-${fileName}`;
+  // [2026-08] MULTI-TENANT: prefixado com usuarioId por consistência com o
+  // resto do sistema (mesmo padrão de chat.routes.js) -- messageId do
+  // WhatsApp já é único por sessão na prática, mas não vale depender só
+  // disso pra isolamento entre operadores.
+  const caminho = `${usuarioId}/${telefone}/${messageId}-${fileName}`;
   const { error: uploadError } = await supabase.storage
     .from(CHAT_BUCKET)
     .upload(caminho, buffer, { contentType: mimetype || 'application/octet-stream', upsert: true });
 
   if (uploadError) throw uploadError;
 
-  const { data } = supabase.storage.from(CHAT_BUCKET).getPublicUrl(caminho);
-  return { anexoUrl: data.publicUrl, anexoNome: fileName };
+  // [2026-08] SEGURANÇA: bucket privado -- não gera/grava URL pública aqui.
+  // Só o path é persistido; a URL (signed, curta duração) é calculada sob
+  // demanda quando o front pede o histórico da conversa (ver chat.routes.js).
+  return { anexoPath: caminho, anexoNome: fileName };
 }
 
 // Tenta achar o TELEFONE REAL por trás de um "@lid" (identificador opaco que o
@@ -113,12 +119,25 @@ async function resolverTelefonePorLid(sock, key) {
 // fantasma salva sob o id opaco do lid. Funde ela na conversa certa (ou, se a
 // conversa certa ainda não existe, só "renomeia" a fantasma) -- sem isso, o
 // histórico anterior ficaria pra sempre num contato separado.
-async function fundirFantasmaLidSeExistir(telefonePseudo, telefoneReal) {
+// usuarioId sempre escopa a busca: cada operador tem sua própria carteira de
+// conversas, um telefone pseudo-lid de um usuário nunca deve se fundir com a
+// conversa de outro usuário.
+async function fundirFantasmaLidSeExistir(telefonePseudo, telefoneReal, usuarioId) {
   if (telefonePseudo === telefoneReal) return;
-  const { data: fantasma } = await supabase.from('conversas').select('id').eq('telefone', telefonePseudo).maybeSingle();
+  const { data: fantasma } = await supabase
+    .from('conversas')
+    .select('id')
+    .eq('telefone', telefonePseudo)
+    .eq('usuario_id', usuarioId)
+    .maybeSingle();
   if (!fantasma) return;
 
-  const { data: real } = await supabase.from('conversas').select('id').eq('telefone', telefoneReal).maybeSingle();
+  const { data: real } = await supabase
+    .from('conversas')
+    .select('id')
+    .eq('telefone', telefoneReal)
+    .eq('usuario_id', usuarioId)
+    .maybeSingle();
   if (real) {
     await supabase.from('mensagens').update({ conversa_id: real.id }).eq('conversa_id', fantasma.id);
     await supabase.from('conversas').delete().eq('id', fantasma.id);
@@ -132,7 +151,13 @@ async function fundirFantasmaLidSeExistir(telefonePseudo, telefoneReal) {
 
 // Acha a conversa pelo telefone (cria se não existir) e atualiza os campos de resumo
 // (nome, última mensagem, contador de não lidas). Retorna a linha da conversa.
-async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quandoIso, slot, numeroNaoConfirmado }) {
+// usuarioId é sempre obrigatório: escopa TUDO (busca de conversa existente,
+// busca de cliente vinculado, criação de conversa nova) -- é o que garante
+// que a carteira de um operador nunca vaza/mistura com a de outro, mesmo que
+// dois operadores tenham, cada um, um cliente com o mesmo telefone salvo.
+async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quandoIso, usuarioId, numeroNaoConfirmado }) {
+  if (!usuarioId) throw new Error('usuarioId é obrigatório para upsertConversa');
+
   // Busca por QUALQUER variação do telefone (com/sem o 9º dígito, ver
   // normalizarVariantes) -- não só pelo valor exato. Sem isso, a fatura enviada
   // com o telefone salvo num formato e a resposta do cliente chegando no outro
@@ -143,6 +168,7 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
     .from('conversas')
     .select('*')
     .in('telefone', variantesTelefone)
+    .eq('usuario_id', usuarioId)
     .maybeSingle();
 
   const resumo = texto || (tipo === 'imagem' ? '📷 Imagem' : tipo === 'audio' ? '🎤 Áudio' : tipo === 'documento' ? '📄 Documento' : '');
@@ -150,7 +176,12 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
   if (!existente) {
     let clienteId = null;
     let nomeCliente = null;
-    const { data: cliente } = await supabase.from('clientes').select('id, nome').in('telefone', variantesTelefone).maybeSingle();
+    const { data: cliente } = await supabase
+      .from('clientes')
+      .select('id, nome')
+      .in('telefone', variantesTelefone)
+      .eq('usuario_id', usuarioId)
+      .maybeSingle();
     if (cliente) {
       clienteId = cliente.id;
       nomeCliente = cliente.nome;
@@ -162,13 +193,13 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
     const { data, error } = await supabase
       .from('conversas')
       .insert({
+        usuario_id: usuarioId,
         telefone,
         cliente_id: clienteId,
         nome_contato: nomeCliente || nomeContato || (numeroNaoConfirmado ? 'Contato não identificado (WhatsApp não revelou o número)' : null),
         nao_lidas: fromMe ? 0 : 1,
         ultima_mensagem: resumo,
         ultima_mensagem_em: quandoIso,
-        slot: slot || null,
         numero_nao_confirmado: Boolean(numeroNaoConfirmado),
       })
       .select()
@@ -186,7 +217,12 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
   let nomeParaSalvar = existente.nome_contato;
   let clienteIdParaSalvar = existente.cliente_id;
   if (!existente.cliente_id) {
-    const { data: cliente } = await supabase.from('clientes').select('id, nome').in('telefone', variantesTelefone).maybeSingle();
+    const { data: cliente } = await supabase
+      .from('clientes')
+      .select('id, nome')
+      .in('telefone', variantesTelefone)
+      .eq('usuario_id', usuarioId)
+      .maybeSingle();
     if (cliente) {
       // Vincula agora o cliente_id que ainda não tinha sido linkado -- cobre o
       // caso em que a conversa nasceu ANTES do cliente ser cadastrado (ou
@@ -204,7 +240,6 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
       cliente_id: clienteIdParaSalvar,
       nome_contato: nomeParaSalvar,
       nao_lidas: fromMe ? 0 : existente.nao_lidas + 1,
-      ...(slot ? { slot } : {}),
       ...(ehMaisNova ? { ultima_mensagem: resumo, ultima_mensagem_em: quandoIso } : {}),
     })
     .eq('id', existente.id)
@@ -214,7 +249,7 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
   return data;
 }
 
-async function processarMensagem(sock, waMessage, slot) {
+async function processarMensagem(sock, waMessage, usuarioId) {
   const key = waMessage.key;
   const remoteJid = key?.remoteJid;
   const messageId = key?.id;
@@ -256,7 +291,7 @@ async function processarMensagem(sock, waMessage, slot) {
       telefone = normalizarTelefone(resolvido);
       // Pode já existir uma conversa fantasma de uma vez anterior em que não
       // dava pra resolver -- funde nela agora que finalmente sabemos o número.
-      await fundirFantasmaLidSeExistir(`lid-${remoteJid.split('@')[0]}`, telefone).catch((err) =>
+      await fundirFantasmaLidSeExistir(`lid-${remoteJid.split('@')[0]}`, telefone, usuarioId).catch((err) =>
         console.error('[chatIngest] erro ao fundir conversa fantasma de lid:', err.message)
       );
     } else {
@@ -276,12 +311,12 @@ async function processarMensagem(sock, waMessage, slot) {
     ? new Date(Number(waMessage.messageTimestamp) * 1000).toISOString()
     : new Date().toISOString();
 
-  let anexoUrl = null;
+  let anexoPath = null;
   let anexoNome = null;
   if (interpretado.mediaMsg) {
     try {
-      const resultado = await baixarEGuardarMidia(sock, waMessage, interpretado, telefone, messageId);
-      anexoUrl = resultado.anexoUrl;
+      const resultado = await baixarEGuardarMidia(sock, waMessage, interpretado, telefone, messageId, usuarioId);
+      anexoPath = resultado.anexoPath;
       anexoNome = resultado.anexoNome;
     } catch (err) {
       console.error('[chatIngest] erro ao baixar mídia:', err.message);
@@ -298,7 +333,7 @@ async function processarMensagem(sock, waMessage, slot) {
     tipo: interpretado.tipo,
     fromMe,
     quandoIso,
-    slot,
+    usuarioId,
     numeroNaoConfirmado,
   });
 
@@ -310,11 +345,10 @@ async function processarMensagem(sock, waMessage, slot) {
         direcao: fromMe ? 'saida' : 'entrada',
         tipo: interpretado.tipo,
         texto: interpretado.texto,
-        anexo_url: anexoUrl,
+        anexo_path: anexoPath,
         anexo_nome: anexoNome,
         message_id: messageId,
         created_at: quandoIso,
-        slot: slot || null,
       },
       { onConflict: 'message_id', ignoreDuplicates: true }
     );
@@ -325,9 +359,9 @@ async function processarMensagem(sock, waMessage, slot) {
 // e/ou anexo), sem precisar rebaixar mídia -- já temos o anexo em mãos.
 // Quando o eco dessa mesma mensagem chegar pelo messages.upsert (fromMe: true), o
 // upsert por message_id (ignoreDuplicates) evita duplicar.
-export async function registrarMensagemSaida({ telefone, texto, tipo, anexoUrl, anexoNome, messageId, slot }) {
+export async function registrarMensagemSaida({ telefone, texto, tipo, anexoPath, anexoNome, messageId, usuarioId }) {
   const quandoIso = new Date().toISOString();
-  const conversa = await upsertConversa({ telefone, nomeContato: null, texto, tipo, fromMe: true, quandoIso, slot });
+  const conversa = await upsertConversa({ telefone, nomeContato: null, texto, tipo, fromMe: true, quandoIso, usuarioId });
 
   const { data, error } = await supabase
     .from('mensagens')
@@ -337,12 +371,11 @@ export async function registrarMensagemSaida({ telefone, texto, tipo, anexoUrl, 
         direcao: 'saida',
         tipo,
         texto: texto || null,
-        anexo_url: anexoUrl || null,
+        anexo_path: anexoPath || null,
         anexo_nome: anexoNome || null,
         message_id: messageId,
         status_entrega: 'enviado',
         created_at: quandoIso,
-        slot: slot || null,
       },
       { onConflict: 'message_id', ignoreDuplicates: true }
     )
@@ -352,16 +385,16 @@ export async function registrarMensagemSaida({ telefone, texto, tipo, anexoUrl, 
   return { conversa, mensagem: data };
 }
 
-export async function registrarMensagensRecebidas(sock, messages, slot) {
+export async function registrarMensagensRecebidas(sock, messages, usuarioId) {
   for (const m of messages) {
-    await processarMensagem(sock, m, slot);
+    await processarMensagem(sock, m, usuarioId);
   }
 }
 
-export async function registrarHistoricoInicial(sock, messages, slot) {
+export async function registrarHistoricoInicial(sock, messages, usuarioId) {
   // Processa em ordem cronológica pra "última mensagem" da conversa ficar coerente.
   const ordenadas = [...messages].sort((a, b) => Number(a.messageTimestamp || 0) - Number(b.messageTimestamp || 0));
   for (const m of ordenadas) {
-    await processarMensagem(sock, m, slot);
+    await processarMensagem(sock, m, usuarioId);
   }
 }

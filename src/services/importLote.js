@@ -1,6 +1,7 @@
 import XLSX from 'xlsx';
 import { supabase } from '../lib/supabase.js';
 import { normalizarTelefone } from '../lib/telefone.js';
+import { propagarDadosFatura } from '../lib/faturaPropagacao.js';
 
 // [2026-08] O fluxo server-side antigo (processarImportacao: recebia zip+PDFs
 // binários e rodava OCR/QR no próprio backend com pdfjs-dist + jsQR) foi
@@ -40,7 +41,7 @@ async function mapComConcorrencia(itens, limite, tarefa) {
 // pelos dois fluxos de importação (server-side com PDF binário, e client-side
 // já processado no navegador) -- a parte de "criar envio + itens" é idêntica
 // nos dois, só muda como cada linha chega até aqui.
-async function montarResumoECriarEnvio(totalLinhas, processadas, templateMensagemPadrao, lote = null) {
+async function montarResumoECriarEnvio(totalLinhas, processadas, templateMensagemPadrao, lote, usuarioId) {
   const resultado = {
     total: totalLinhas,
     sucesso: [],
@@ -70,7 +71,7 @@ async function montarResumoECriarEnvio(totalLinhas, processadas, templateMensage
   // cria o lote de envio já com os itens prontos (status pendente, aguardando o clique de "Disparar")
   const { data: envio, error: envioError } = await supabase
     .from('envios')
-    .insert({ template_mensagem: templateMensagemPadrao, status: 'pendente', lote: lote || null })
+    .insert({ usuario_id: usuarioId, template_mensagem: templateMensagemPadrao, status: 'pendente', lote: lote || null })
     .select()
     .single();
 
@@ -107,29 +108,49 @@ const CONCORRENCIA_UPSERT_LOTE = Number(process.env.IMPORTACAO_LOTE_CONCORRENCIA
 //
 // `itensProntos` é um array de:
 //   { linha, numero, nome, valor, vencimento, linha_digitavel, mensagem,
-//     telefoneNormalizado, pdf_url, pdf_path, pix_code }
-// (pdf_url/pdf_path vêm nulos quando a linha não tinha PDF casado no zip --
-// tratado como 'semPdf', igual ao fluxo antigo)
+//     telefoneNormalizado, pdf_path, pix_code }
+// (pdf_path vem nulo quando a linha não tinha PDF casado no zip -- tratado
+// como 'semPdf', igual ao fluxo antigo. pdf_url NÃO é mais usado nem gravado
+// -- bucket privado, ver src/lib/supabase.js)
 // `linhasSemDados` é o array de linhas que já vieram marcadas como inválidas
 // do navegador (sem numero/nome, ou telefone que não normalizou).
-export async function processarImportacaoLotePronto({ itensProntos, linhasSemDados, templateMensagemPadrao, lote }) {
+export async function processarImportacaoLotePronto({ itensProntos, linhasSemDados, templateMensagemPadrao, lote, usuarioId }) {
+  if (!usuarioId) throw new Error('usuarioId é obrigatório');
+
+  // [2026-08] SEGURANÇA: pdf_path vem do corpo da requisição (JSON), controlado
+  // pelo navegador -- nunca confiar cegamente que aponta pra um arquivo do
+  // PRÓPRIO usuário. Path legítimo sempre começa com "${usuarioId}/" (é assim
+  // que POST /importacao/upload-pdf prefixa no backend, ver importacao.routes.js).
+  // Se vier algo fora desse prefixo (adivinhado, copiado de outra sessão, bug em
+  // outro lugar), trata como se não tivesse PDF em vez de gravar uma referência
+  // pra um arquivo que pode não ser dele.
+  const prefixoEsperado = `${usuarioId}/`;
+  function pdfPathPertenceAoUsuario(pdfPath) {
+    return typeof pdfPath === 'string' && pdfPath.startsWith(prefixoEsperado);
+  }
+
   async function processarItem(item) {
-    if (!item.pdf_url) {
+    // [2026-08] SEGURANÇA: usa pdf_path (identifica o objeto no bucket
+    // privado) pra saber se a linha tem PDF, não mais pdf_url -- essa URL
+    // deixou de ser gerada/gravada (bucket "faturas" não é mais público).
+    if (!item.pdf_path || !pdfPathPertenceAoUsuario(item.pdf_path)) {
       return { tipo: 'semPdf', linha: item };
     }
 
-    // upsert do cliente por telefone (evita duplicar se reimportar a planilha) --
-    // mesmo comportamento do fluxo server-side.
+    // upsert do cliente por (usuario_id, telefone) -- evita duplicar se
+    // reimportar a planilha, sem colidir com o cliente de outro operador que
+    // por acaso tenha o mesmo telefone salvo (ver migration-13-multi-tenant.sql).
     const { data: cliente, error: clienteError } = await supabase
       .from('clientes')
       .upsert(
         {
+          usuario_id: usuarioId,
           nome: item.nome,
           telefone: item.telefoneNormalizado,
           valor: item.valor,
           vencimento: item.vencimento,
         },
-        { onConflict: 'telefone' },
+        { onConflict: 'usuario_id,telefone' },
       )
       .select()
       .single();
@@ -138,16 +159,16 @@ export async function processarImportacaoLotePronto({ itensProntos, linhasSemDad
       return { tipo: 'semDados', linha: { ...item, erro: clienteError.message } };
     }
 
-    const { error: updateError } = await supabase
-      .from('clientes')
-      .update({
-        pdf_url: item.pdf_url,
-        pdf_path: item.pdf_path,
-        pix_code: item.pix_code ?? null,
-        linha_digitavel: item.linha_digitavel ?? null,
-        pdf_atualizado_em: new Date().toISOString(),
-      })
-      .eq('id', cliente.id);
+    // Propaga o PDF/pix/linha digitável pro grupo inteiro, caso este cliente
+    // já tenha outro número vinculado (ver lib/faturaPropagacao.js e
+    // migration-15) -- a importação em si só sabe casar 1 linha = 1
+    // telefone, o vínculo entre números é feito à parte, na tela Clientes.
+    const { error: updateError } = await propagarDadosFatura(cliente.id, usuarioId, {
+      pdf_path: item.pdf_path,
+      pix_code: item.pix_code ?? null,
+      linha_digitavel: item.linha_digitavel ?? null,
+      pdf_atualizado_em: new Date().toISOString(),
+    });
 
     if (updateError) {
       return { tipo: 'semDados', linha: { ...item, erro: updateError.message } };
@@ -161,5 +182,5 @@ export async function processarImportacaoLotePronto({ itensProntos, linhasSemDad
   const todasProcessadas = [...processadasSemDados, ...processadasItens];
   const totalLinhas = itensProntos.length + linhasSemDados.length;
 
-  return montarResumoECriarEnvio(totalLinhas, todasProcessadas, templateMensagemPadrao, lote);
+  return montarResumoECriarEnvio(totalLinhas, todasProcessadas, templateMensagemPadrao, lote, usuarioId);
 }

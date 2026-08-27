@@ -147,6 +147,28 @@ router.post('/importar-lista', async (req, res) => {
       continue;
     }
     criados.push({ ...item, cliente_id: data.id });
+
+    // [bug] Este upsert grava só a própria linha (por telefone) -- se este
+    // número já estiver vinculado a um grupo (migration-15) de uma
+    // importação/vínculo anterior, os OUTROS números do grupo ficavam sem
+    // o tipo_fatura/data_prazo/valor desta reimportação (só quem sobe PDF/PIX
+    // ou usa PUT /:id passava por propagarDadosFatura). Propaga aqui também,
+    // pra manter os números vinculados sempre com a mesma fatura -- mesma
+    // regra de faturaPropagacao.js. Best-effort: não falha o item por causa
+    // disso, já que a própria linha já foi gravada com sucesso acima.
+    try {
+      await propagarDadosFatura(data.id, req.user.id, {
+        valor: item.valor ?? null,
+        tipo_fatura: item.tipo_fatura ?? null,
+        data_prazo: item.data_prazo ?? null,
+        numero_contrato: item.numero_contrato ?? null,
+        data_contrato: item.data_contrato ?? null,
+        ...(item.data_prazo ? { vencimento: formatarDataIsoParaBr(item.data_prazo) } : {}),
+      });
+    } catch (propagacaoError) {
+      console.error('[clientes] erro ao propagar fatura no import da lista crua:', propagacaoError.message);
+    }
+
     // Mesmo comportamento do cadastro manual (POST /) -- ver comentário lá.
     await associarPendentesAoCliente(data.id, item.nome, req.user.id);
   }
@@ -295,7 +317,7 @@ router.get('/', async (req, res) => {
   // completo. Igual ao filtro por tag acima, resolvemos o conjunto de IDs
   // ANTES da query principal, pra paginação continuar correta.
   if (recebeu_disparo === 'true' || recebeu_disparo === 'false') {
-    const { data: enviosDoUsuario } = await supabase.from('envios').select('id').eq('usuario_id', req.user.id);
+    const { data: enviosDoUsuario } = await supabase.from('envios').select('id').eq('usuario_id', req.user.id).limit(20000);
     const envioIdsDoUsuario = (enviosDoUsuario || []).map((e) => e.id);
     let clienteIdsComDisparo = [];
     if (envioIdsDoUsuario.length) {
@@ -303,7 +325,8 @@ router.get('/', async (req, res) => {
         .from('envio_itens')
         .select('cliente_id')
         .in('envio_id', envioIdsDoUsuario)
-        .eq('status', 'enviado');
+        .eq('status', 'enviado')
+        .limit(20000);
       clienteIdsComDisparo = [...new Set((itensEnviados || []).map((i) => i.cliente_id).filter(Boolean))];
     }
     if (recebeu_disparo === 'true') {
@@ -325,7 +348,7 @@ router.get('/', async (req, res) => {
   const idsDaPagina = clientesBase.map((c) => c.id);
   let contagemPorCliente = {};
   if (idsDaPagina.length) {
-    const { data: enviosDoUsuario } = await supabase.from('envios').select('id').eq('usuario_id', req.user.id);
+    const { data: enviosDoUsuario } = await supabase.from('envios').select('id').eq('usuario_id', req.user.id).limit(20000);
     const envioIdsDoUsuario = (enviosDoUsuario || []).map((e) => e.id);
     if (envioIdsDoUsuario.length) {
       const { data: itens } = await supabase
@@ -333,7 +356,8 @@ router.get('/', async (req, res) => {
         .select('cliente_id')
         .in('envio_id', envioIdsDoUsuario)
         .in('cliente_id', idsDaPagina)
-        .eq('status', 'enviado');
+        .eq('status', 'enviado')
+        .limit(20000);
       contagemPorCliente = (itens || []).reduce((acc, i) => {
         acc[i.cliente_id] = (acc[i.cliente_id] || 0) + 1;
         return acc;

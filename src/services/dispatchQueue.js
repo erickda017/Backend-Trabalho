@@ -105,6 +105,26 @@ function proximaJanela() {
   return new Date(inicioHojeBR.getTime() + 24 * 60 * 60 * 1000);
 }
 
+// [bug] Grava o status 'enviado' com retry próprio, NUNCA lançando erro pro
+// chamador. Existe porque antes essa gravação era um `await` normal dentro do
+// mesmo try/catch do envio -- se o WhatsApp mandasse a mensagem com sucesso
+// mas esse UPDATE falhasse por qualquer instabilidade passageira (rede,
+// Supabase), o item caía no catch e virava 'erro'. `reenviarErros` então
+// reprocessava esse item mais tarde e mandava a MESMA fatura pro cliente de
+// novo -- ou seja, uma falha só na gravação do status virava um disparo
+// físico duplicado de verdade. Com retry aqui, o caso comum (instabilidade
+// passageira) se resolve sozinho sem nunca marcar 'erro' num envio que já
+// saiu.
+async function atualizarStatusEnviado(itemId, dadosAtualizacao, tentativas = 3) {
+  for (let tentativa = 1; tentativa <= tentativas; tentativa += 1) {
+    const { error } = await supabase.from('envio_itens').update(dadosAtualizacao).eq('id', itemId);
+    if (!error) return true;
+    console.error(`[dispatch] tentativa ${tentativa}/${tentativas} falhou ao gravar status 'enviado' do item ${itemId}:`, error.message);
+    if (tentativa < tentativas) await new Promise((resolve) => setTimeout(resolve, 1000 * tentativa));
+  }
+  return false;
+}
+
 async function enviarItem(item, envio, usuarioId) {
   const cliente = item.clientes;
   const templateDoItem = item.mensagem_override || escolherTemplate(envio);
@@ -147,16 +167,21 @@ async function enviarItem(item, envio, usuarioId) {
         })
       : await enviarMensagemTexto({ numero: cliente.telefone, jid, mensagem, usuarioId });
 
-    await supabase
-      .from('envio_itens')
-      .update({
-        status: 'enviado',
-        erro: null,
-        message_id: messageId,
-        status_entrega: 'enviado',
-        enviado_em: new Date().toISOString(),
-      })
-      .eq('id', item.id);
+    // A partir daqui a mensagem JÁ FOI enviada de verdade pelo WhatsApp --
+    // ver comentário em atualizarStatusEnviado sobre por que essa gravação
+    // não pode mais lançar erro e cair no catch abaixo como 'erro'.
+    const statusGravado = await atualizarStatusEnviado(item.id, {
+      status: 'enviado',
+      erro: null,
+      message_id: messageId,
+      status_entrega: 'enviado',
+      enviado_em: new Date().toISOString(),
+    });
+    if (!statusGravado) {
+      console.error(
+        `[dispatch] CRÍTICO: mensagem enviada pro WhatsApp mas não foi possível gravar o status no banco pro item ${item.id} (cliente ${cliente.nome}). NÃO reenviar automaticamente -- corrigir manualmente pra evitar duplicar o envio.`,
+      );
+    }
 
     // Sem isso, disparo em massa nunca aparecia na aba Chat -- a conversa só nascia
     // quando o cliente respondia. Grava aqui o mesmo jeito que a resposta manual do

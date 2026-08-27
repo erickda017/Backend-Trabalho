@@ -120,7 +120,13 @@ export async function vincularNumero(clienteId, outroId, usuarioId) {
     .select(CAMPOS_FATURA.join(', '))
     .eq('id', principalId)
     .maybeSingle();
-  if (principal && (principal.pdf_path || principal.pix_code)) {
+  // Checa TODOS os campos de fatura, não só pdf_path/pix_code -- um cliente
+  // recém-importado da lista crua pode já ter tipo_fatura/data_prazo/valor
+  // sem ainda ter PDF/Pix, e esse caso também precisa propagar pro novo
+  // membro do grupo (bug: antes só olhava pdf_path/pix_code e perdia essa
+  // situação, deixando o número recém-vinculado sem safra/tipo_fatura).
+  const temFaturaExistente = principal && CAMPOS_FATURA.some((campo) => principal[campo] !== null && principal[campo] !== undefined);
+  if (temFaturaExistente) {
     await propagarDadosFatura(principalId, usuarioId, principal);
   }
 }

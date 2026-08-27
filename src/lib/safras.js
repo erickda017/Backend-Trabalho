@@ -41,9 +41,39 @@ async function clientesDaSafra(usuarioId, safra) {
     .from('clientes')
     .select('id, nome, telefone, tipo_fatura, valor, cliente_principal_id')
     .eq('usuario_id', usuarioId)
-    .eq('safra', safra);
+    .eq('safra', safra)
+    // Sem isso, o PostgREST corta em 1000 linhas por padrão e as métricas
+    // (total_clientes etc) ficam silenciosamente erradas em carteiras
+    // grandes -- mesmo limite já usado em supervisor.routes.js pra evitar
+    // esse corte.
+    .limit(20000);
   if (error) throw error;
   return data || [];
+}
+
+// Ids de TODOS os membros dos grupos (migration-15, números vinculados) de um
+// conjunto de clientes "principais" -- inclui o próprio principal. Necessário
+// porque um número vinculado pode ter sua própria `data_prazo`/safra
+// diferente da do principal (ver bug documentado em faturaPropagacao.js) e
+// por isso não aparece em `clientesDaSafra`, mas "pagou"/"recebeu disparo"
+// continuam sendo perguntas sobre a PESSOA (o grupo inteiro), não sobre uma
+// linha isolada -- mesmo critério que frontend/src/lib/agruparClientes.ts já
+// usa pra somar disparos recebidos do grupo.
+async function membrosDoGrupoPorPrincipais(usuarioId, idsPrincipais) {
+  const mapa = new Map(idsPrincipais.map((id) => [id, [id]]));
+  if (!idsPrincipais.length) return mapa;
+  const { data, error } = await supabase
+    .from('clientes')
+    .select('id, cliente_principal_id')
+    .eq('usuario_id', usuarioId)
+    .in('cliente_principal_id', idsPrincipais)
+    .limit(20000);
+  if (error) throw error;
+  for (const membro of data || []) {
+    const grupo = mapa.get(membro.cliente_principal_id);
+    if (grupo) grupo.push(membro.id);
+  }
+  return mapa;
 }
 
 // IDs dos clientes com a tag "Pago" (mesma tag usada em POST
@@ -61,7 +91,8 @@ async function idsComTagPago(usuarioId, clienteIds) {
     .from('cliente_tags')
     .select('cliente_id')
     .eq('tag_id', tag.id)
-    .in('cliente_id', clienteIds);
+    .in('cliente_id', clienteIds)
+    .limit(20000);
   if (error) throw error;
   return new Set((data || []).map((r) => r.cliente_id));
 }
@@ -71,7 +102,7 @@ async function idsComTagPago(usuarioId, clienteIds) {
 // clientes.routes.js (GET /, filtro recebeu_disparo).
 async function idsComDisparo(usuarioId, clienteIds) {
   if (!clienteIds.length) return new Set();
-  const { data: envios } = await supabase.from('envios').select('id').eq('usuario_id', usuarioId);
+  const { data: envios } = await supabase.from('envios').select('id').eq('usuario_id', usuarioId).limit(20000);
   const envioIds = (envios || []).map((e) => e.id);
   if (!envioIds.length) return new Set();
   const { data, error } = await supabase
@@ -79,7 +110,8 @@ async function idsComDisparo(usuarioId, clienteIds) {
     .select('cliente_id')
     .in('envio_id', envioIds)
     .in('cliente_id', clienteIds)
-    .eq('status', 'enviado');
+    .eq('status', 'enviado')
+    .limit(20000);
   if (error) throw error;
   return new Set((data || []).map((r) => r.cliente_id).filter(Boolean));
 }
@@ -111,15 +143,24 @@ export async function calcularMetricasSafra(usuarioId, safra) {
   const principais = clientes.filter((c) => !c.cliente_principal_id);
   const idsPrincipais = principais.map((c) => c.id);
 
+  // "Pagou"/"recebeu disparo" são perguntas sobre a PESSOA, não sobre uma
+  // linha/telefone isolado -- um número vinculado (migration-15) pode ter
+  // recebido o disparo ou estar com a tag "Pago" enquanto o principal não,
+  // então o conjunto de ids checado precisa ser o GRUPO inteiro, não só
+  // `idsPrincipais` (bug: undercounting antes, divergia do que
+  // agruparClientes.ts já soma no frontend pra cada grupo).
+  const grupoPorPrincipal = await membrosDoGrupoPorPrincipais(usuarioId, idsPrincipais);
+  const idsDoGrupoTodo = [...grupoPorPrincipal.values()].flat();
+
   const [pagosSet, disparoSet] = await Promise.all([
-    idsComTagPago(usuarioId, idsPrincipais),
-    idsComDisparo(usuarioId, idsPrincipais),
+    idsComTagPago(usuarioId, idsDoGrupoTodo),
+    idsComDisparo(usuarioId, idsDoGrupoTodo),
   ]);
 
   const totalFpd = principais.filter((c) => c.tipo_fatura === 'FPD').length;
   const totalSpd = principais.filter((c) => c.tipo_fatura === 'SPD').length;
-  const pagos = principais.filter((c) => pagosSet.has(c.id)).length;
-  const receberamDisparo = principais.filter((c) => disparoSet.has(c.id)).length;
+  const pagos = principais.filter((c) => (grupoPorPrincipal.get(c.id) || [c.id]).some((id) => pagosSet.has(id))).length;
+  const receberamDisparo = principais.filter((c) => (grupoPorPrincipal.get(c.id) || [c.id]).some((id) => disparoSet.has(id))).length;
 
   const valores = principais.map((c) => Number(c.valor)).filter((v) => Number.isFinite(v));
   const valorTotal = valores.reduce((soma, v) => soma + v, 0);
@@ -150,7 +191,8 @@ export async function listarSafrasAtivas(usuarioId) {
     .from('clientes')
     .select('safra')
     .eq('usuario_id', usuarioId)
-    .not('safra', 'is', null);
+    .not('safra', 'is', null)
+    .limit(20000);
   if (error) throw error;
   const distintas = [...new Set((data || []).map((c) => c.safra))];
   return distintas.sort().reverse();
@@ -219,7 +261,7 @@ function safraEstaFechada(safra) {
 // dos dados operacionais). Idempotente: rodar de novo só atualiza o mesmo
 // registro (upsert por usuario_id+safra).
 export async function consolidarSafrasFechadas() {
-  const { data: usuarios, error } = await supabase.from('clientes').select('usuario_id').not('safra', 'is', null);
+  const { data: usuarios, error } = await supabase.from('clientes').select('usuario_id').not('safra', 'is', null).limit(20000);
   if (error) {
     console.error('[safras] erro ao buscar usuários com safra ativa:', error.message);
     return 0;

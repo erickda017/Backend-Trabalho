@@ -1,39 +1,66 @@
 // Faz o parse de uma lista "crua" de clientes no formato usado nos relatórios de
-// cobrança (ver docs/ou exemplo enviado pelo usuário): blocos de texto separados
-// por linhas em branco/"#####", cada bloco tendo, NESSA ORDEM:
-//   NOME (linha só com letras/espaços, tudo maiúsculo)
-//   contrato (linha só com dígitos -- número identificador, guardado em
-//     `numero_contrato`; NÃO é uma data, então não alimenta `data_contrato`)
-//   "CPF ###.###.###-##" (IGNORADO -- às vezes vem CNPJ mesmo rotulado "CPF")
-//   um ou mais telefones (uma linha por número, só dígitos)
-//   "Fatura N" (opcional -- N=1 vira tipo_fatura "FPD", N=2 vira "SPD",
-//     qualquer outro número fica sem tipo_fatura reconhecido)
-//   "R$ 123,45" ou "—" (valor da fatura -- opcional)
-//   "— DD/MM/AAAA" (opcional -- data de PRAZO da fatura; o traço antes da
-//     data é um placeholder de outra coluna do relatório, sempre "—" nos
-//     exemplos reais até hoje, mas a data é extraída de qualquer lugar da
-//     linha por regex, não por posição fixa, pra não quebrar se esse
-//     placeholder mudar)
+// cobrança, aceitando DUAS variações da mesma informação:
 //
-// Não dá pra confiar no tamanho do número pra distinguir contrato de telefone
-// (varia de 6 a 9 dígitos nos dois), então a distinção é por POSIÇÃO no bloco:
-// o primeiro número após o nome é sempre contrato, os números depois do CPF são
-// sempre telefone -- até aparecer "Fatura" ou um novo nome.
+//   (a) FORMATO ANTIGO (1 campo por linha, várias linhas por cliente): blocos de
+//       texto separados por linha em branco/"#####", cada bloco tendo, NESSA
+//       ORDEM: nome / contrato / "CPF ..." / telefone(s) / "Fatura N" / valor /
+//       "— DD/MM/AAAA".
+//   (b) FORMATO COMPOSTO (vários campos numa mesma linha, ex.: relatório colado
+//       direto de uma planilha/site): "JOÃO DA SILVA | CPF 123... | 41999999999
+//       | R$ 150,00 | ...", separados por "|", tab, 2+ espaços ou " - ".
+//
+// A ideia central: em vez de classificar a LINHA inteira (que só funciona se
+// cada linha tiver exatamente 1 campo) e exigir os campos numa ORDEM fixa
+// (como a versão antiga deste arquivo fazia, com uma máquina de estados
+// EXPECT_NOME -> EXPECT_CONTRATO -> ... -> EXPECT_PRAZO), cada linha é
+// primeiro dividida em SEGMENTOS (ver dividirEmSegmentos) e cada segmento é
+// classificado e encaixado no cliente ATUAL, na hora, não importa em que
+// ordem apareceu -- um NOME sempre abre um bloco novo (fechando o anterior,
+// mesmo incompleto), e qualquer outro campo reconhecido (CPF/contrato/
+// telefone/Fatura/valor/prazo) preenche o bloco aberto no momento.
+//
+// Isso é necessário porque exigir ordem fixa quebra o caso mais comum de
+// lista composta ("NOME | TELEFONE | VALOR", sem contrato nem CPF): com
+// ordem fixa, o primeiro número depois do nome seria sempre lido como
+// "contrato" (por posição), engolindo o telefone de verdade por engano.
+//
+// Contrato x telefone agora se distingue pelo TAMANHO do número (não mais só
+// pela posição): 10 a 13 dígitos = telefone (DDD+8/9 dígitos, com ou sem
+// código do país); 4 a 9 dígitos = número de contrato. Cobre os casos reais
+// observados (contrato de 6 dígitos, telefone de 10/11/13) sem depender de
+// vir sempre logo depois do nome.
 //
 // Retorna um item POR TELEFONE (cliente com 2 números vira 2 linhas), já no
 // formato que a planilha modelo usa, ampliado com os campos de safra:
 // { nome, numero, valor, arquivo, tipo_fatura, data_prazo, numero_contrato, data_contrato }.
+// Também devolve `avisos`: 1 por bloco sem telefone E 1 por trecho que não foi
+// reconhecido como nenhum campo esperado (pra não sumir dado silenciosamente
+// -- ver POST /clientes/converter-lista, que mostra isso pro operador antes
+// de importar de verdade).
 
-function normalizarLinha(l) {
-  let s = l.replace(/\t/g, ' ').trim();
-  // Anotações explicativas coladas na linha (ex: "IRANDIR GONCALVES ALVES = NOME",
-  // "CPF 233.228.379-04 (NAO UTILIZE ESSA INFORMAÇÃO)") não fazem parte do dado
-  // real -- removidas antes de classificar a linha, senão a linha vira "lixo"
-  // e o bloco inteiro se perde.
-  const idxIgual = s.indexOf(' = ');
-  if (idxIgual > 0) s = s.slice(0, idxIgual).trim();
-  s = s.replace(/\s*\([^)]*\)\s*$/, '').trim();
-  return s;
+// Divide uma linha em segmentos por separador de coluna explícito: "|", tab,
+// 2+ espaços seguidos, ou " - " (traço COM espaço dos dois lados -- de
+// propósito, pra nunca cortar um CPF/telefone formatado com traço colado,
+// tipo "233.228.379-04" ou "99999-9999", que não tem espaço ao redor do
+// traço). Vírgula NÃO é separador aqui: no formato BR, vírgula é separador
+// decimal ("R$ 150,00"), cortar por ela quebraria o valor.
+function dividirEmSegmentos(linha) {
+  return linha
+    .split(/\t+|\s*\|\s*|\s+-\s+|\s{2,}|\s*;\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Mesma limpeza de antes (normalizarLinha), mas aplicada por SEGMENTO: anotação
+// explicativa colada (ex: "IRANDIR GONCALVES ALVES = NOME", "CPF 233.228.379-04
+// (NAO UTILIZE ESSA INFORMAÇÃO)") não é dado real -- removida antes de
+// classificar, senão o segmento vira "lixo" e a informação real dali se perde.
+function normalizarSegmento(s) {
+  let out = s.trim();
+  const idxIgual = out.indexOf(' = ');
+  if (idxIgual > 0) out = out.slice(0, idxIgual).trim();
+  out = out.replace(/\s*\([^)]*\)\s*$/, '').trim();
+  return out;
 }
 
 function ehSeparador(l) {
@@ -56,10 +83,10 @@ function ehLinhaValor(l) {
   return /^r\$\s*[\d.,]+/i.test(l) || l === '—' || l === '-';
 }
 
-// Linha que contém uma data no formato brasileiro (DD/MM/AAAA ou DD/MM/AA),
-// em qualquer posição da linha -- cobre tanto "24/09/2026" sozinho quanto
-// "—    24/09/2026" (placeholder + data, formato real observado nas listas
-// de cobrança da empresa).
+// Segmento que contém uma data no formato brasileiro (DD/MM/AAAA ou DD/MM/AA),
+// em qualquer posição -- cobre tanto "24/09/2026" sozinho quanto "—
+// 24/09/2026" (placeholder + data, formato real observado nas listas de
+// cobrança da empresa).
 const REGEX_DATA_BR = /(\d{1,2})\/(\d{1,2})\/(\d{2,4})/;
 function ehLinhaComData(l) {
   return REGEX_DATA_BR.test(l);
@@ -82,7 +109,7 @@ function parseValor(l) {
 
 // "24/09/2026" -> "2026-09-24" (ISO, o que o Postgres/coluna `date` espera).
 // Aceita ano com 2 dígitos (assume 20XX -- nunca apareceu esse caso nos
-// dados reais até hoje, mas evita descartar a linha inteira se aparecer).
+// dados reais até hoje, mas evita descartar o bloco inteiro se aparecer).
 function parseDataBr(l) {
   const match = l.match(REGEX_DATA_BR);
   if (!match) return null;
@@ -114,7 +141,7 @@ export function slugNome(nome) {
   return (
     String(nome || '')
       .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[̀-ͯ]/g, '')
       .toLowerCase()
       .trim()
       .replace(/[^a-z0-9]+/g, '-')
@@ -122,55 +149,49 @@ export function slugNome(nome) {
   );
 }
 
-// Estados do parser
-const EXPECT_NOME = 'EXPECT_NOME';
-const EXPECT_CONTRATO = 'EXPECT_CONTRATO';
-const EXPECT_CPF = 'EXPECT_CPF';
-const COLETANDO_TELEFONES = 'COLETANDO_TELEFONES';
-const EXPECT_VALOR = 'EXPECT_VALOR';
-// Linha "— DD/MM/AAAA" que vem depois do valor (data de PRAZO da fatura) --
-// só existe nas listas mais novas (as que já trazem Fatura N); listas
-// antigas/mais simples nunca chegam nesse estado e continuam funcionando
-// exatamente como antes.
-const EXPECT_PRAZO = 'EXPECT_PRAZO';
+// Distingue telefone de número de contrato pelo TAMANHO (ver comentário no
+// topo do arquivo pro porquê disso substituir a distinção por posição).
+function pareceTelefone(digitos) {
+  return digitos.length >= 10 && digitos.length <= 13;
+}
+function pareceContrato(digitos) {
+  return digitos.length >= 4 && digitos.length <= 9;
+}
 
 // Extrai só os NOMES de uma lista "crua" no mesmo formato reconhecido acima
-// (bloco NOME/contrato/CPF/telefone(s)/Fatura/valor) -- usado por fluxos que
-// só precisam CASAR com um cliente já cadastrado (ex: POST
-// /clientes/importar-pagos), não criar cliente novo, então contrato/CPF/
-// telefone(s)/Fatura/valor são só ruído a ignorar; cada linha classificada
-// como nome (`ehLinhaNome`) vira um item, sem depender de posição/estado --
-// por isso também aceita, sem nenhuma mudança, o formato simples "1 nome por
-// linha" que este fluxo já suportava (cada linha OK já é uma linha-nome).
+// (bloco NOME/contrato/CPF/telefone(s)/Fatura/valor, em linhas separadas OU
+// tudo numa linha só) -- usado por fluxos que só precisam CASAR com um
+// cliente já cadastrado (ex: POST /clientes/importar-pagos), não criar
+// cliente novo, então contrato/CPF/telefone(s)/Fatura/valor são só ruído a
+// ignorar; cada segmento classificado como nome (`ehLinhaNome`) vira um item,
+// sem depender de posição/estado -- por isso também aceita, sem nenhuma
+// mudança, o formato simples "1 nome por linha" que este fluxo já suportava.
 export function extrairNomesDeListaCrua(textoCru) {
-  const linhas = String(textoCru || '')
-    .split(/\r?\n/)
-    .map(normalizarLinha);
+  const linhas = String(textoCru || '').split(/\r?\n/);
 
   const nomes = [];
-  for (const l of linhas) {
-    if (ehSeparador(l)) continue;
-    if (ehLinhaNome(l)) nomes.push(l);
+  for (const linhaBruta of linhas) {
+    if (ehSeparador(linhaBruta.trim())) continue;
+    for (const segmentoBruto of dividirEmSegmentos(linhaBruta)) {
+      const segmento = normalizarSegmento(segmentoBruto);
+      if (segmento && ehLinhaNome(segmento)) nomes.push(segmento);
+    }
   }
   return nomes;
 }
 
 export function parseListaClientes(textoCru) {
-  const linhas = String(textoCru || '')
-    .split(/\r?\n/)
-    .map(normalizarLinha);
-
   const itens = []; // { nome, numero, valor, arquivo, tipo_fatura, data_prazo, numero_contrato, data_contrato }
   const avisos = [];
 
-  let estado = EXPECT_NOME;
-  let atual = null; // { nome, telefones: [], tipo_fatura, numero_contrato }
+  // { nome, telefones: [], tipo_fatura, numero_contrato, valor, dataPrazo }
+  let atual = null;
 
   function novoBloco(nome) {
-    return { nome, telefones: [], tipo_fatura: null, numero_contrato: null };
+    return { nome, telefones: [], tipo_fatura: null, numero_contrato: null, valor: null, dataPrazo: null };
   }
 
-  function finalizarBloco(valor, dataPrazo) {
+  function finalizarBloco() {
     if (!atual) return;
     if (atual.telefones.length === 0) {
       avisos.push(`"${atual.nome}" ignorado: nenhum telefone encontrado.`);
@@ -180,11 +201,11 @@ export function parseListaClientes(textoCru) {
         itens.push({
           nome: atual.nome,
           numero,
-          valor: valor ?? null,
+          valor: atual.valor,
           arquivo,
-          tipo_fatura: atual.tipo_fatura ?? null,
-          data_prazo: dataPrazo ?? null,
-          numero_contrato: atual.numero_contrato ?? null,
+          tipo_fatura: atual.tipo_fatura,
+          data_prazo: atual.dataPrazo,
+          numero_contrato: atual.numero_contrato,
           // Nenhum formato de lista crua observado até hoje traz uma data de
           // contrato distinta da data de prazo (ver comentário no topo do
           // arquivo) -- fica reservado pra quando/se isso aparecer.
@@ -193,125 +214,76 @@ export function parseListaClientes(textoCru) {
       }
     }
     atual = null;
-    estado = EXPECT_NOME;
   }
 
-  for (let i = 0; i < linhas.length; i++) {
-    const l = linhas[i];
+  // Trecho não-vazio que não bateu com NENHUM campo reconhecido -- antes
+  // isso desaparecia sem deixar rastro (bug real: operador não tinha como
+  // saber que uma parte da lista colada foi ignorada). Agora vira aviso, com
+  // o próprio texto do trecho, pra revisar antes de importar.
+  function avisarTrechoIgnorado(segmento) {
+    avisos.push(`Trecho não reconhecido, ignorado: "${segmento}"`);
+  }
 
-    if (estado === EXPECT_NOME) {
-      if (ehSeparador(l)) continue;
-      if (ehLinhaNome(l)) {
-        atual = novoBloco(l);
-        estado = EXPECT_CONTRATO;
-      }
-      // linha "solta" que não parece nome (lixo entre blocos) -- ignora e segue
+  const linhas = String(textoCru || '').split(/\r?\n/);
+
+  for (const linhaBruta of linhas) {
+    if (ehSeparador(linhaBruta.trim())) {
+      finalizarBloco();
       continue;
     }
 
-    if (estado === EXPECT_CONTRATO) {
-      if (ehSeparador(l)) continue;
-      if (ehLinhaDigitos(l)) {
-        atual.numero_contrato = l.replace(/\D/g, '');
-        estado = EXPECT_CPF;
-        continue;
-      }
-      // bloco sem contrato (raro/malformado) -- se já veio CPF ou telefone, segue o fluxo
-      if (ehLinhaCpf(l)) {
-        estado = COLETANDO_TELEFONES;
-        continue;
-      }
-      if (ehLinhaNome(l)) {
-        // nome novo sem nunca ter achado contrato/telefone -- descarta o anterior
-        finalizarBloco(null, null);
-        atual = novoBloco(l);
-        estado = EXPECT_CONTRATO;
-      }
-      continue;
-    }
+    const segmentos = dividirEmSegmentos(linhaBruta).map(normalizarSegmento).filter(Boolean);
 
-    if (estado === EXPECT_CPF) {
-      if (ehSeparador(l)) continue;
-      if (ehLinhaCpf(l)) {
-        estado = COLETANDO_TELEFONES;
-        continue;
-      }
-      if (ehLinhaNome(l)) {
-        finalizarBloco(null, null);
-        atual = novoBloco(l);
-        estado = EXPECT_CONTRATO;
-      }
-      continue;
-    }
+    for (const l of segmentos) {
+      // CPF nunca é guardado (às vezes vem CNPJ mesmo rotulado "CPF") --
+      // ignora independente de ter ou não um bloco aberto.
+      if (ehLinhaCpf(l)) continue;
 
-    if (estado === COLETANDO_TELEFONES) {
-      if (ehSeparador(l)) continue;
-      if (ehLinhaDigitos(l)) {
-        atual.telefones.push(l.replace(/\D/g, ''));
+      if (ehLinhaNome(l)) {
+        // Um NOME sempre abre um bloco novo -- fecha o anterior (mesmo que
+        // incompleto), não importa quantos campos ele já tinha coletado.
+        finalizarBloco();
+        atual = novoBloco(l);
         continue;
       }
+
+      if (!atual) {
+        // Campo reconhecido (valor/data/fatura/dígitos) sem nenhum nome
+        // aberto antes -- não tem a quem atribuir.
+        avisarTrechoIgnorado(l);
+        continue;
+      }
+
       if (ehLinhaFatura(l)) {
         atual.tipo_fatura = tipoFaturaDeLinha(l);
-        estado = EXPECT_VALOR;
+        continue;
+      }
+      if (ehLinhaComData(l)) {
+        atual.dataPrazo = parseDataBr(l);
         continue;
       }
       if (ehLinhaValor(l)) {
-        // "Fatura N" ausente, valor vem direto (sem prazo -- formato antigo)
-        finalizarBloco(parseValor(l), null);
+        atual.valor = parseValor(l);
         continue;
       }
-      if (ehLinhaNome(l)) {
-        // bloco terminou sem Fatura/valor (ex: MARIA ZENIR... no exemplo real)
-        finalizarBloco(null, null);
-        atual = novoBloco(l);
-        estado = EXPECT_CONTRATO;
-      }
-      continue;
-    }
-
-    if (estado === EXPECT_VALOR) {
-      if (ehSeparador(l)) continue;
-      if (ehLinhaComData(l)) {
-        // Sem linha de valor separada -- essa linha já é a de prazo (ex.:
-        // "Fatura N" seguido direto de "— DD/MM/AAAA", sem a linha
-        // R$/— do meio).
-        finalizarBloco(null, parseDataBr(l));
+      if (ehLinhaDigitos(l)) {
+        const digitos = l.replace(/\D/g, '');
+        if (pareceContrato(digitos) && !atual.numero_contrato && !pareceTelefone(digitos)) {
+          atual.numero_contrato = digitos;
+        } else {
+          // Também cobre o fallback de um tamanho fora do esperado (melhor
+          // tentar como telefone do que perder o número).
+          atual.telefones.push(digitos);
+        }
         continue;
       }
-      if (ehLinhaValor(l)) {
-        atual.valorPendente = parseValor(l);
-        estado = EXPECT_PRAZO;
-        continue;
-      }
-      if (ehLinhaNome(l)) {
-        // "Fatura N" veio mas não tinha linha de valor nem de prazo depois
-        finalizarBloco(null, null);
-        atual = novoBloco(l);
-        estado = EXPECT_CONTRATO;
-      }
-      continue;
-    }
-
-    if (estado === EXPECT_PRAZO) {
-      if (ehSeparador(l)) continue;
-      if (ehLinhaComData(l)) {
-        finalizarBloco(atual.valorPendente, parseDataBr(l));
-        continue;
-      }
-      if (ehLinhaNome(l)) {
-        // valor veio, mas a linha de prazo não -- finaliza só com o que tem
-        finalizarBloco(atual.valorPendente, null);
-        atual = novoBloco(l);
-        estado = EXPECT_CONTRATO;
-      }
-      continue;
+      avisarTrechoIgnorado(l);
     }
   }
 
-  // Último bloco do arquivo (EOF sem Fatura/valor/prazo -- comum quando o
-  // texto foi cortado). Se já tinha um valor pendente (parou bem depois da
-  // linha de valor, sem a de prazo), preserva-o.
-  finalizarBloco(atual?.valorPendente ?? null, null);
+  // Último bloco do texto (EOF sem separador final -- comum quando o texto
+  // foi cortado).
+  finalizarBloco();
 
   return { itens, avisos };
 }

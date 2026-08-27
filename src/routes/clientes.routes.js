@@ -9,6 +9,7 @@ import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
 import { propagarDadosFatura, vincularNumero, desvincularNumero, membrosDoGrupo } from '../lib/faturaPropagacao.js';
 import { casarClientePorNome, normalizarTexto } from '../lib/nomeMatch.js';
 import { cancelarItensPendentesDosClientes } from '../lib/tagsEfeito.js';
+import { sugerirPromocoesSpd, proximaDataMesmoDia } from '../lib/promocaoSpd.js';
 import { associarPendentesAoCliente } from '../lib/faturasPendentes.js';
 
 const router = Router();
@@ -260,11 +261,17 @@ router.post('/importar-pagos', async (req, res) => {
     await cancelarItensPendentesDosClientes(encontrados.map((e) => e.cliente_id), usuarioId);
   }
 
+  // [regra de negócio] "FPD pago entra na próxima safra como SPD" -- não
+  // aplica sozinho (ver lib/promocaoSpd.js pra motivo), só sinaliza pro
+  // operador confirmar cada um via POST /clientes/:id/promover-spd.
+  const sugestoesSpd = encontrados.length ? await sugerirPromocoesSpd(encontrados.map((e) => e.cliente_id), usuarioId) : [];
+
   res.json({
     tag,
     total_colados: nomes.length,
     encontrados,
     nao_encontrados: naoEncontrados,
+    sugestoes_spd: sugestoesSpd,
   });
 });
 
@@ -593,6 +600,41 @@ router.get('/:id/historico', async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
+});
+
+// [regra de negócio] Confirma a promoção FPD -> SPD de um cliente (ver
+// lib/promocaoSpd.js). Só aplica quando o operador chama explicitamente --
+// nunca é automático. Body opcional `data_prazo` (YYYY-MM-DD) sobrescreve a
+// data sugerida, pro caso do operador já saber o vencimento real do SPD
+// (vindo do relatório de cobrança) em vez de usar a estimativa "mesmo dia do
+// mês seguinte".
+router.post('/:id/promover-spd', async (req, res) => {
+  const { id } = req.params;
+  const { data_prazo: dataPrazoOverride } = req.body || {};
+
+  const { data: cliente, error: buscaError } = await supabase
+    .from('clientes')
+    .select('id, tipo_fatura, data_prazo')
+    .eq('id', id)
+    .eq('usuario_id', req.user.id)
+    .maybeSingle();
+  if (buscaError) return res.status(500).json({ error: buscaError.message });
+  if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado' });
+
+  const novaData = dataPrazoOverride || proximaDataMesmoDia(cliente.data_prazo);
+  if (!novaData) {
+    return res.status(400).json({ error: 'Não foi possível calcular a nova data de prazo -- informe "data_prazo" no corpo da requisição' });
+  }
+
+  const { data, error } = await propagarDadosFatura(id, req.user.id, {
+    tipo_fatura: 'SPD',
+    data_prazo: novaData,
+    vencimento: formatarDataIsoParaBr(novaData),
+  });
+  if (error) return res.status(500).json({ error: error.message });
+  const clienteAtualizado = (data || []).find((c) => c.id === id) || data?.[0];
+  if (!clienteAtualizado) return res.status(404).json({ error: 'Cliente não encontrado' });
+  res.json(await clienteComSignedUrl(achatarTags(clienteAtualizado)));
 });
 
 // Remove cliente (e o PDF associado no Storage, se houver).

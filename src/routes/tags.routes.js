@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
 import { cancelarItensPendentesDosClientes } from '../lib/tagsEfeito.js';
+import { sugerirPromocaoSpd } from '../lib/promocaoSpd.js';
 
 const router = Router();
 
@@ -96,7 +97,7 @@ router.post('/:id/clientes/:clienteId', async (req, res) => {
   const usuarioId = req.user.id;
 
   const [{ data: tag }, { data: cliente }] = await Promise.all([
-    supabase.from('tags').select('id, permite_disparo').eq('id', id).eq('usuario_id', usuarioId).maybeSingle(),
+    supabase.from('tags').select('id, nome, permite_disparo').eq('id', id).eq('usuario_id', usuarioId).maybeSingle(),
     supabase.from('clientes').select('id').eq('id', clienteId).eq('usuario_id', usuarioId).maybeSingle(),
   ]);
   if (!tag || !cliente) return res.status(404).json({ error: 'Tag ou cliente não encontrado' });
@@ -114,7 +115,15 @@ router.post('/:id/clientes/:clienteId', async (req, res) => {
     await cancelarItensPendentesDosClientes([clienteId], usuarioId);
   }
 
-  res.status(201).json({ ok: true });
+  // [regra de negócio] Marcar "Pago" (mesma tag de POST /importar-pagos) num
+  // cliente FPD dispara a mesma sugestão de promoção pra SPD -- ver
+  // lib/promocaoSpd.js. Só sinaliza, não aplica sozinho.
+  let sugestaoSpd = null;
+  if (/^pago$/i.test(tag.nome || '')) {
+    sugestaoSpd = await sugerirPromocaoSpd(clienteId, usuarioId);
+  }
+
+  res.status(201).json({ ok: true, sugestao_spd: sugestaoSpd });
 });
 
 // Remove uma tag de um cliente

@@ -38,6 +38,8 @@ services:
         value: 20
       - key: PIX_MAX_TOTAL_MB
         value: 800
+      - key: PIX_SERVIDOR_MAX_ARQUIVO_MB
+        value: 12
       - key: WEBHOOK_URL
         sync: false
       - key: WEBHOOK_SECRET

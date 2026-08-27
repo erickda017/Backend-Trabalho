@@ -22,6 +22,10 @@ import faturasRoutes from './routes/faturas.routes.js';
 import boletosRoutes from './routes/boletos.routes.js';
 import perfilRoutes from './routes/perfil.routes.js';
 import supervisorRoutes from './routes/supervisor.routes.js';
+import arquivosRoutes from './routes/arquivos.routes.js';
+import faturasPendentesRoutes from './routes/faturasPendentes.routes.js';
+import safrasRoutes from './routes/safras.routes.js';
+import { iniciarConsolidacaoSafras } from './lib/safras.js';
 
 dotenv.config();
 
@@ -103,6 +107,15 @@ app.use('/api/faturas', requireAuth, faturasRoutes);
 app.use('/api/boletos', requireAuth, boletosRoutes);
 app.use('/api/perfil', requireAuth, perfilRoutes);
 app.use('/api/supervisor', requireAuth, requireSupervisor, supervisorRoutes);
+// [2026-08] Proxy de arquivos (esconde a URL do Supabase Storage do
+// navegador -- ver comentário completo em routes/arquivos.routes.js).
+// requireAuth aqui também: mesmo que o proxy já gere a signed URL
+// internamente, sem isso qualquer um com o path do arquivo (que agora fica
+// visível na URL do proxy, ex: /api/arquivos/faturas/cliente-123/x.pdf)
+// conseguiria baixar o PDF de qualquer cliente sem estar logado.
+app.use('/api/arquivos', requireAuth, arquivosRoutes);
+app.use('/api/faturas', requireAuth, faturasPendentesRoutes);
+app.use('/api/safras', requireAuth, safrasRoutes);
 
 // Handler de erro global -- sem isso, erros como multer (arquivo grande demais, tipo
 // errado) ou qualquer exceção síncrona em uma rota caem no handler padrão do Express,
@@ -125,6 +138,7 @@ const server = app.listen(PORT, () => {
   iniciarScheduler();
   iniciarLimpezaAutomatica();
   iniciarLimpezaSessoesInativas();
+  iniciarConsolidacaoSafras();
   recuperarEnviosTravados().catch((err) =>
     console.error('[server] falha ao recuperar envios travados:', err.message || err)
   );

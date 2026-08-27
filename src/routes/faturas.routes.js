@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { supabase, BUCKET, gerarSignedUrls } from '../lib/supabase.js';
+import { supabase, urlsProxyArquivo } from '../lib/supabase.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { responderExportacao } from '../lib/exportar.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
@@ -11,8 +11,11 @@ const router = Router();
 //
 // [2026-08] SEGURANÇA: filtros com_pdf/sem_pdf e a coluna `pdf_url` da resposta
 // agora usam `pdf_path` como fonte da verdade (bucket privado, pdf_url não é
-// mais persistida -- ver clientes.routes.js). A URL devolvida ao front é
-// sempre uma Signed URL calculada na hora, de curta duração.
+// mais persistida -- ver clientes.routes.js). O `pdf_url` devolvido ao front
+// não é mais uma signed URL do Supabase, é um path relativo ao proxy de
+// arquivos deste backend (ver `urlProxyArquivo` em lib/supabase.js e
+// routes/arquivos.routes.js) -- evita expor o domínio do Supabase na barra
+// de endereço do navegador quando o PDF é aberto.
 router.get('/', async (req, res) => {
   const { busca, com_pdf, sem_pdf } = req.query;
   const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
@@ -33,7 +36,7 @@ router.get('/', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
 
   const linhas = data || [];
-  const urls = await gerarSignedUrls(BUCKET, linhas.map((l) => l.pdf_path));
+  const urls = urlsProxyArquivo('faturas', linhas.map((l) => l.pdf_path));
   res.json(linhas.map((l, i) => ({ ...l, pdf_url: urls[i] })));
 });
 

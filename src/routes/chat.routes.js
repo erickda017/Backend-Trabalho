@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { supabase, BUCKET, CHAT_BUCKET, gerarSignedUrl, gerarSignedUrls } from '../lib/supabase.js';
+import { supabase, BUCKET, CHAT_BUCKET, gerarSignedUrl, urlsProxyArquivo } from '../lib/supabase.js';
 import { enviarMensagemTexto, enviarMensagemComAnexo, validarNumero } from '../services/whatsapp.js';
 import { registrarMensagemSaida } from '../services/chatIngest.js';
 import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
@@ -18,8 +18,21 @@ function tipoPorMimetype(mimetype) {
 }
 
 // [2026-08] SEGURANÇA: buckets "faturas" e "chat-midia" agora são privados.
-// pdf_url/anexo_url não são mais persistidas -- sempre recalculadas como
-// Signed URL de curta duração a partir de pdf_path/anexo_path.
+// pdf_url/anexo_url não são mais persistidas -- sempre recalculadas a
+// partir de pdf_path/anexo_path.
+//
+// [2026-08] Duas categorias diferentes de URL aqui, não confundir:
+//   - Pra EXIBIR no navegador (`/conversas`, `/conversas/:id/mensagens`
+//     abaixo): usa `urlsProxyArquivo`, um path relativo ao proxy deste
+//     backend (ver routes/arquivos.routes.js) -- esconde o domínio do
+//     Supabase da barra de endereço quando o front abre o anexo/PDF.
+//   - Pra o BAILEYS BAIXAR e mandar pro WhatsApp (envio de mensagem com
+//     anexo, envio de fatura -- mais abaixo neste arquivo): continua
+//     `gerarSignedUrl`, uma signed URL de verdade do Supabase. Essas nunca
+//     chegam a virar link clicável no navegador do operador -- é o
+//     servidor (Baileys) que busca o arquivo via HTTP pra anexar na
+//     mensagem, então não faz sentido (nem funcionaria sem dar mais uma
+//     volta desnecessária pelo proxy) usar o path do proxy aqui.
 // [2026-08] MULTI-TENANT: toda rota abaixo é escopada por req.user.id --
 // conversas/mensagens/envio de WhatsApp sempre do operador autenticado.
 
@@ -34,7 +47,7 @@ router.get('/conversas', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
 
   const conversas = data || [];
-  const urls = await gerarSignedUrls(BUCKET, conversas.map((c) => c.clientes?.pdf_path || null));
+  const urls = urlsProxyArquivo('faturas', conversas.map((c) => c.clientes?.pdf_path || null));
   res.json(
     conversas.map((c, i) => ({
       ...c,
@@ -62,7 +75,7 @@ router.get('/conversas/:id/mensagens', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
 
   const mensagens = data || [];
-  const urls = await gerarSignedUrls(CHAT_BUCKET, mensagens.map((m) => m.anexo_path || null));
+  const urls = urlsProxyArquivo('chat-midia', mensagens.map((m) => m.anexo_path || null));
   res.json(mensagens.map((m, i) => ({ ...m, anexo_url: urls[i] })));
 });
 
@@ -201,10 +214,13 @@ router.post('/conversas/:id/mensagens', upload.single('anexo'), async (req, res)
       usuarioId,
     });
 
-    // A resposta pro front (que renderiza a mensagem na hora, sem F5) ainda
-    // precisa de uma URL utilizável -- devolve a mesma signed URL que acabamos
-    // de gerar pro envio, dentro do TTL normal.
-    res.status(201).json({ ...linhaSalva, anexo_url: anexoUrl });
+    // A resposta pro front (que renderiza a mensagem na hora, sem F5) precisa
+    // de uma URL utilizável -- mas não a signed URL crua que acabamos de
+    // gerar pro Baileys (isso exporia o domínio do Supabase se o front abrir
+    // o anexo em nova aba). Convertemos pro path do proxy aqui, igual ao
+    // resto das rotas de listagem deste arquivo.
+    const anexoUrlProxy = anexoPath ? urlsProxyArquivo('chat-midia', [anexoPath])[0] : null;
+    res.status(201).json({ ...linhaSalva, anexo_url: anexoUrlProxy });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -274,7 +290,12 @@ router.post('/conversas/:id/enviar-fatura', async (req, res) => {
         messageId,
         usuarioId,
       });
-      linhaFatura = mensagem ? { ...mensagem, anexo_url: pdfUrlAssinada } : null;
+      // Resposta pro front usa o path do proxy (não a signed URL crua que
+      // acabamos de gerar pro Baileys) -- mesmo motivo do envio de anexo
+      // avulso logo acima neste arquivo: evita expor o domínio do Supabase
+      // se o operador abrir o PDF direto da tela do chat.
+      const anexoUrlProxy = urlsProxyArquivo('faturas', [cliente.pdf_path])[0];
+      linhaFatura = mensagem ? { ...mensagem, anexo_url: anexoUrlProxy } : null;
     }
 
     let linhaPix = null;

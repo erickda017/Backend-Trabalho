@@ -8,7 +8,25 @@ import { supabase } from './supabase.js';
 // Nome e telefone NUNCA propagam -- são a identidade de cada linha.
 // ---------------------------------------------------------------------------
 
-const CAMPOS_FATURA = ['pdf_path', 'pdf_atualizado_em', 'pix_code', 'valor', 'vencimento', 'linha_digitavel'];
+// [2026-08] SAFRAS: tipo_fatura/data_prazo/numero_contrato também são dado
+// da FATURA (mesma linha de raciocínio de valor/vencimento) -- editar
+// qualquer um deles precisa valer pro grupo inteiro. `data_contrato` também
+// entra por simetria, mesmo hoje sempre null na prática (ver CONTEXTO.md).
+// NUNCA incluir `safra` aqui: é coluna GERADA no Postgres, um UPDATE nela
+// falha (e nem faria sentido -- ela se recalcula sozinha a partir de
+// data_prazo).
+const CAMPOS_FATURA = [
+  'pdf_path',
+  'pdf_atualizado_em',
+  'pix_code',
+  'valor',
+  'vencimento',
+  'linha_digitavel',
+  'tipo_fatura',
+  'data_prazo',
+  'numero_contrato',
+  'data_contrato',
+];
 
 // Resolve o id "raiz" do grupo (a linha principal) a partir de qualquer
 // membro: se a própria linha já é principal (cliente_principal_id nulo),
@@ -40,8 +58,9 @@ async function idsDoGrupo(principalId, usuarioId) {
 // Aplica `dados` (só os campos de CAMPOS_FATURA presentes no objeto) em
 // TODAS as linhas do grupo de `clienteId` -- incluindo ela mesma. Chame isso
 // em vez de um `.update().eq('id', clienteId)` direto sempre que a rota
-// gravar pdf_path/pix_code/valor/vencimento/linha_digitavel, pra manter os
-// números vinculados sempre com a mesma fatura.
+// gravar pdf_path/pix_code/valor/vencimento/linha_digitavel/tipo_fatura/
+// data_prazo/numero_contrato/data_contrato, pra manter os números vinculados
+// sempre com a mesma fatura.
 export async function propagarDadosFatura(clienteId, usuarioId, dados) {
   const camposParaGravar = Object.fromEntries(
     Object.entries(dados || {}).filter(([chave, valor]) => CAMPOS_FATURA.includes(chave) && valor !== undefined),

@@ -1,34 +1,13 @@
 import { Router } from 'express';
 import { supabase } from '../lib/supabase.js';
+import { cancelarItensPendentesDosClientes } from '../lib/tagsEfeito.js';
 
 const router = Router();
 
-// Cancela (status -> 'cancelado') os itens ainda `pendente` dos clientes
-// informados, em qualquer envio do usuário que não esteja concluído ou já
-// cancelado -- é o "sai dos lotes atual e futuros" quando uma tag
-// `permite_disparo: false` (ex.: Pago/Cancelado) é aplicada a um cliente.
-// "Futuros" é garantido à parte, filtrando em resolverClienteIds
-// (envios.routes.js) na hora de montar um lote novo; aqui só cuidamos do
-// que já está em andamento/pendente.
-async function cancelarItensPendentesDosClientes(clienteIds, usuarioId) {
-  if (!clienteIds || !clienteIds.length) return;
-
-  const { data: envios } = await supabase
-    .from('envios')
-    .select('id')
-    .eq('usuario_id', usuarioId)
-    .not('status', 'in', '(concluido,cancelado)');
-
-  const envioIds = (envios || []).map((e) => e.id);
-  if (!envioIds.length) return;
-
-  await supabase
-    .from('envio_itens')
-    .update({ status: 'cancelado' })
-    .in('envio_id', envioIds)
-    .in('cliente_id', clienteIds)
-    .eq('status', 'pendente');
-}
+// [2026-08] cancelarItensPendentesDosClientes foi extraída pra
+// lib/tagsEfeito.js -- reaproveitada também pela importação de clientes
+// PAGOS (ver routes/clientes.routes.js, POST /importar-pagos), que aplica
+// uma tag `permite_disparo: false` em massa a partir de uma lista de nomes.
 
 // [2026-08] MULTI-TENANT: tags são por usuário -- cada operador tem seu
 // próprio conjunto (nome único por usuário, não globalmente -- ver

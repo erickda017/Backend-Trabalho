@@ -67,3 +67,30 @@ export async function gerarSignedUrl(bucket, path, ttlSegundos = SIGNED_URL_TTL_
 export async function gerarSignedUrls(bucket, paths, ttlSegundos = SIGNED_URL_TTL_SEGUNDOS) {
   return Promise.all(paths.map((path) => gerarSignedUrl(bucket, path, ttlSegundos)));
 }
+
+// [2026-08] PROXY DE ARQUIVOS: em vez de expor a signed URL do Supabase
+// direto pro front (que a usava como href, revelando o domínio do Supabase
+// na barra de endereço quando o navegador abre o PDF/imagem -- ver
+// routes/arquivos.routes.js pro proxy que resolve isso), as rotas que
+// devolvem `pdf_url`/`anexo_url` agora usam esta função pra montar um path
+// RELATIVO ao proxy do próprio backend, nunca ao Supabase.
+//
+// Mantém a mesma "forma" de resposta que o front já esperava (uma string em
+// `pdf_url`) -- só o que tem dentro da string mudou, de uma URL absoluta do
+// Supabase pra um path relativo tipo "/api/arquivos/faturas/<path>". O
+// front resolve isso com `fetch` + Blob (ver arquivoProtegido.ts), não mais
+// com `<a href>` direto.
+//
+// `bucketApelido` é o nome curto usado na rota do proxy (ver
+// BUCKETS_PERMITIDOS em arquivos.routes.js) -- "faturas" ou "chat-midia",
+// não o nome real do bucket no Supabase (que pode ser diferente, vem de
+// env var). Retorna null se não houver path (mesmo contrato de
+// `gerarSignedUrl`, pra não quebrar os callers que já tratam null).
+export function urlProxyArquivo(bucketApelido, path) {
+  if (!path || typeof path !== 'string') return null;
+  return `/api/arquivos/${bucketApelido}/${path}`;
+}
+
+export function urlsProxyArquivo(bucketApelido, paths) {
+  return paths.map((path) => urlProxyArquivo(bucketApelido, path));
+}

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { supabase, BUCKET, gerarSignedUrls } from '../lib/supabase.js';
+import { supabase, urlsProxyArquivo } from '../lib/supabase.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
 
@@ -36,6 +36,72 @@ async function mapaOperadores() {
   return new Map((data || []).map((p) => [p.id, { id: p.id, email: p.email, nome: p.nome || p.email }]));
 }
 
+// [correção] "cliente" tem que contar PESSOAS, não números. Um mesmo cliente
+// com 2+ números vinculados (migration-15) vira 1 linha principal
+// (cliente_principal_id nulo) + N linhas espelho -- e PDF/Pix/valor são
+// propagados pra todas elas (faturaPropagacao.js). Contar toda linha sem
+// filtrar as espelho infla "Clientes"/"Com PIX"/"Com PDF" no Dashboard do
+// Supervisor (a mesma pessoa contada 2x+), mesmo já sendo tratado direito em
+// GET /operadores logo acima -- o Dashboard tinha ficado pra trás dessa regra
+// (que já vale pro dashboard do operador, ver dashboard.routes.js). Aplique
+// este filtro em toda contagem de "clientes" feita aqui.
+function somenteLinhasPrincipais(clientes) {
+  return (clientes || []).filter((c) => !c.cliente_principal_id);
+}
+
+// Brasil não observa horário de verão desde 2019 -- offset fixo -03:00.
+// Mesmo cálculo usado em dashboard.routes.js (dashboard do operador) e em
+// dispatchQueue.js, replicado aqui pra não criar uma dependência cruzada só
+// por causa de uma função de poucas linhas.
+function inicioDoDiaBR(diasAtras = 0) {
+  const dataSP = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+  const d = new Date(`${dataSP}T00:00:00-03:00`);
+  d.setDate(d.getDate() - diasAtras);
+  return d;
+}
+
+// [2026-08] Mesma "Faturas em valor" (média/total) e mesmo gráfico "Disparos
+// por dia" que já existem no dashboard do operador (ver dashboard.routes.js)
+// -- só que agregados de TODOS os operadores, já que essa é a proposta da
+// tela do Supervisor. Faltavam aqui: o Dashboard do Supervisor tinha ficado
+// só com as contagens "por operador", sem os dois blocos que o dashboard do
+// operador já tem há mais tempo.
+async function resumoValoresGlobal() {
+  const { data, error } = await supabase.from('clientes').select('valor, cliente_principal_id').not('valor', 'is', null).limit(20000);
+  if (error) throw error;
+  const valores = somenteLinhasPrincipais(data).map((c) => Number(c.valor)).filter((v) => Number.isFinite(v));
+  const total = valores.reduce((soma, v) => soma + v, 0);
+  const media = valores.length ? total / valores.length : 0;
+  return { valor_medio: Number(media.toFixed(2)), valor_total: Number(total.toFixed(2)), faturas_com_valor: valores.length };
+}
+
+async function serieDisparosGlobalPorDia(dias = 7) {
+  const inicioJanela = inicioDoDiaBR(dias - 1);
+  const { data: itens, error } = await supabase
+    .from('envio_itens')
+    .select('enviado_em')
+    .eq('status', 'enviado')
+    .gte('enviado_em', inicioJanela.toISOString())
+    .limit(50000);
+  if (error) throw error;
+
+  const porDia = {};
+  for (const item of itens || []) {
+    if (!item.enviado_em) continue;
+    const diaSP = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(item.enviado_em));
+    porDia[diaSP] = (porDia[diaSP] || 0) + 1;
+  }
+
+  const serie = [];
+  for (let i = dias - 1; i >= 0; i--) {
+    const d = new Date(inicioJanela);
+    d.setDate(inicioJanela.getDate() + (dias - 1 - i));
+    const chave = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(d);
+    serie.push({ data: chave, total: porDia[chave] || 0 });
+  }
+  return serie;
+}
+
 // GET /api/supervisor/operadores -- lista todo mundo que já logou (perfis),
 // com um resumo rápido de carteira. Base do dashboard e dos filtros
 // "por operador" nas outras telas do Supervisor.
@@ -50,12 +116,16 @@ router.get('/operadores', async (req, res) => {
     // o card de cada operador ficaria sub-contado sem nenhum aviso. 20 mil é
     // uma folga generosa; ajuste se a operação crescer muito além disso.
     const [{ data: clientes }, { data: envios }] = await Promise.all([
-      supabase.from('clientes').select('id, usuario_id, pix_code').in('usuario_id', ids.length ? ids : ['—']).limit(20000),
+      supabase.from('clientes').select('id, usuario_id, pix_code, cliente_principal_id').in('usuario_id', ids.length ? ids : ['—']).limit(20000),
       supabase.from('envios').select('id, usuario_id, status').in('usuario_id', ids.length ? ids : ['—']).limit(20000),
     ]);
 
     const operadores = (perfis || []).map((p) => {
-      const meusClientes = (clientes || []).filter((c) => c.usuario_id === p.id);
+      // [2026-08] Mesma regra do dashboard do operador (ver dashboard.routes.js):
+      // só a linha principal de cada grupo de números vinculados (migration-15)
+      // conta como "cliente", senão a mesma pessoa com 2 números aparece 2x
+      // na carteira do supervisor.
+      const meusClientes = (clientes || []).filter((c) => c.usuario_id === p.id && !c.cliente_principal_id);
       const meusEnvios = (envios || []).filter((e) => e.usuario_id === p.id);
       return {
         ...p,
@@ -76,7 +146,10 @@ router.get('/operadores', async (req, res) => {
 // Filtros: busca, operador_id, com_pix/sem_pix (mesmos nomes de /api/clientes).
 router.get('/clientes', async (req, res) => {
   try {
-    const { busca, operador_id, com_pix, sem_pix } = req.query;
+    // [correção] com_pdf/sem_pdf existem em GET /api/clientes (tela do
+    // operador) mas nunca tinham sido replicados aqui -- o Supervisor não
+    // tinha como filtrar quem está sem PDF entre todos os operadores.
+    const { busca, operador_id, com_pix, sem_pix, com_pdf, sem_pdf } = req.query;
     const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
 
     let query = supabase.from('clientes').select('*, cliente_tags(tags(id, nome, cor))', { count: 'exact' }).order('nome');
@@ -87,6 +160,8 @@ router.get('/clientes', async (req, res) => {
     }
     if (com_pix === 'true' || com_pix === '1') query = query.not('pix_code', 'is', null);
     if (sem_pix === 'true' || sem_pix === '1') query = query.is('pix_code', null);
+    if (com_pdf === 'true' || com_pdf === '1') query = query.not('pdf_path', 'is', null);
+    if (sem_pdf === 'true' || sem_pdf === '1') query = query.is('pdf_path', null);
 
     const { data, error } = await query.range(from, to);
     if (error) throw error;
@@ -123,7 +198,11 @@ router.get('/faturas', async (req, res) => {
     if (error) throw error;
 
     const linhas = data || [];
-    const [urls, operadores] = await Promise.all([gerarSignedUrls(BUCKET, linhas.map((l) => l.pdf_path)), mapaOperadores()]);
+    // pdf_url devolvido ao front é um path relativo ao proxy de arquivos
+    // deste backend, não uma signed URL do Supabase -- ver
+    // routes/arquivos.routes.js e o mesmo padrão em clientes/faturas.routes.js.
+    const urls = urlsProxyArquivo('faturas', linhas.map((l) => l.pdf_path));
+    const operadores = await mapaOperadores();
     res.json(linhas.map((l, i) => ({ ...l, pdf_url: urls[i], operador: operadores.get(l.usuario_id) || null })));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -179,15 +258,28 @@ router.get('/disparos', async (req, res) => {
 // totais gerais, pra tela de Dashboard do Supervisor.
 router.get('/dashboard', async (req, res) => {
   try {
-    const [{ data: perfis, error: perfisError }, { data: clientes, error: clientesError }, { data: envios, error: enviosError }] =
-      await Promise.all([
-        supabase.from('perfis').select('id, email, nome'),
-        supabase.from('clientes').select('id, usuario_id, pix_code, pdf_path').limit(20000),
-        supabase.from('envios').select('id, usuario_id, status, created_at').limit(20000),
-      ]);
+    const [
+      { data: perfis, error: perfisError },
+      { data: clientesRaw, error: clientesError },
+      { data: envios, error: enviosError },
+      valores,
+      serieDisparos,
+    ] = await Promise.all([
+      supabase.from('perfis').select('id, email, nome'),
+      // [correção] precisa de cliente_principal_id pra descontar linhas
+      // espelho de números vinculados (ver somenteLinhasPrincipais acima) --
+      // sem isso um cliente com 2 números era contado 2x em "Clientes",
+      // "Com PDF" e "Com PIX", tanto por operador quanto no total geral.
+      supabase.from('clientes').select('id, usuario_id, pix_code, pdf_path, cliente_principal_id').limit(20000),
+      supabase.from('envios').select('id, usuario_id, status, created_at').limit(20000),
+      resumoValoresGlobal(),
+      serieDisparosGlobalPorDia(7),
+    ]);
     if (perfisError) throw perfisError;
     if (clientesError) throw clientesError;
     if (enviosError) throw enviosError;
+
+    const clientes = somenteLinhasPrincipais(clientesRaw);
 
     const envioIds = (envios || []).map((e) => e.id);
     let itensPorEnvio = new Map();
@@ -205,7 +297,7 @@ router.get('/dashboard', async (req, res) => {
     }
 
     const porOperador = (perfis || []).map((p) => {
-      const meusClientes = (clientes || []).filter((c) => c.usuario_id === p.id);
+      const meusClientes = clientes.filter((c) => c.usuario_id === p.id);
       const meusEnvios = (envios || []).filter((e) => e.usuario_id === p.id);
       const contadoresTotais = meusEnvios.reduce(
         (acc, e) => {
@@ -229,14 +321,39 @@ router.get('/dashboard', async (req, res) => {
       };
     });
 
+    // [2026-08] Totais de enviados/falhas/pendentes agregados de TODOS os
+    // operadores -- mesma info que o dashboard do operador já mostra
+    // (enviados/falhas/pendentes, ver dashboard.routes.js), só que somada em
+    // vez de por usuário. Reaproveita `itensPorEnvio` já buscado acima, sem
+    // bater no banco de novo.
+    const contadoresGlobais = porOperador.reduce(
+      (acc, op) => {
+        acc.enviados += op.enviados;
+        acc.falhas += op.falhas;
+        return acc;
+      },
+      { enviados: 0, falhas: 0 },
+    );
+    let pendentesGlobal = 0;
+    for (const itens of itensPorEnvio.values()) {
+      for (const item of itens) {
+        if (item.status === 'pendente') pendentesGlobal++;
+      }
+    }
+
     res.json({
       totais: {
         operadores: (perfis || []).length,
-        clientes: (clientes || []).length,
-        com_pix: (clientes || []).filter((c) => c.pix_code).length,
+        clientes: clientes.length,
+        com_pix: clientes.filter((c) => c.pix_code).length,
         disparos_em_andamento: (envios || []).filter((e) => ['em_andamento', 'pendente', 'pausado', 'agendado'].includes(e.status)).length,
         disparos_concluidos: (envios || []).filter((e) => e.status === 'concluido').length,
+        enviados: contadoresGlobais.enviados,
+        falhas: contadoresGlobais.falhas,
+        pendentes: pendentesGlobal,
+        ...valores,
       },
+      serie_disparos_7dias: serieDisparos,
       por_operador: porOperador,
     });
   } catch (err) {

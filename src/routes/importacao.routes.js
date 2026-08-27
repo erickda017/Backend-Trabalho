@@ -3,7 +3,7 @@ import multer from 'multer';
 import XLSX from 'xlsx';
 import { processarImportacaoLotePronto } from '../services/importLote.js';
 import { normalizarTelefone } from '../lib/telefone.js';
-import { supabase, BUCKET, gerarSignedUrl } from '../lib/supabase.js';
+import { supabase, BUCKET, urlProxyArquivo } from '../lib/supabase.js';
 
 const router = Router();
 
@@ -83,9 +83,11 @@ router.post('/upload-pdf', uploadPdfComTratamentoDeErro, async (req, res) => {
     // Devolvemos `path` (o que o navegador vai gravar em pdf_path no lote,
     // ver frontend/src/lib/importacaoBrowser.ts) e, como conveniência pro
     // navegador poder mostrar uma prévia/confirmação imediata do PDF
-    // recém-enviado, uma signed URL de curta duração -- ela NUNCA é gravada
-    // em lugar nenhum, só serve pra essa resposta.
-    const signedUrl = await gerarSignedUrl(BUCKET, caminho);
+    // recém-enviado, um path relativo ao proxy de arquivos deste backend
+    // (ver routes/arquivos.routes.js) -- não mais uma signed URL crua do
+    // Supabase, pra não expor o domínio do Supabase se o front abrir isso
+    // como link.
+    const signedUrl = urlProxyArquivo('faturas', caminho);
 
     res.status(201).json({ path: caminho, signedUrl });
   } catch (err) {

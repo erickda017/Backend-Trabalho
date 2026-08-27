@@ -1,17 +1,91 @@
 import { Router } from 'express';
+import multer from 'multer';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import { supabase } from '../lib/supabase.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { responderExportacao } from '../lib/exportar.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
+import { persistirExtracaoPix } from '../lib/pixPersistencia.js';
+import { extrairPixDeArquivoNoServidor } from '../services/extratorServidorPix.js';
 
-// [2026-08] Esta rota NÃO recebe mais PDF nenhum. O upload + extração de Pix
-// (fatiar o PDF com pdf-lib, mandar cada página pro Cloudflare Worker de OCR)
-// acontece 100% no navegador -- ver frontend/src/lib/pixWorkerClient.ts. O
-// resultado já pronto é salvo via POST /api/boletos/salvar-pix (ver
-// boletos.routes.js). Esta rota ficou só com listagem/consulta das extrações
-// já feitas, vínculo manual com cliente e exportação -- nada aqui grava ou lê
-// bytes de PDF, então não há mais risco de RAM associado a ela.
+// [2026-08] Esta rota NÃO recebe mais PDF nenhum pro fluxo PADRÃO. O upload +
+// extração de Pix (fatiar o PDF com pdf-lib, mandar cada página pro
+// Cloudflare Worker de OCR) acontece 100% no navegador -- ver
+// frontend/src/lib/pixExtractor.ts. O resultado já pronto é salvo via POST
+// /api/boletos/salvar-pix (ver boletos.routes.js). Esta rota tem
+// listagem/consulta das extrações já feitas, vínculo manual com cliente,
+// exportação -- e, desde [2026-08], uma ÚNICA exceção que recebe PDF: POST
+// /extrair-servidor, a "opção 2" de extração (ver bloco logo abaixo e
+// services/extratorServidorPix.js pro porquê disso ser seguro em RAM).
 const router = Router();
+
+// ---------------------------------------------------------------------------
+// POST /api/pix/extrair-servidor -- extração de Pix RODANDO NO BACKEND, 1 PDF
+// POR REQUISIÇÃO. É a "opção 2" pedida pra quando a extração no navegador não
+// é viável (aparelho fraco, muitos PDFs, navegador sem suporte a Worker) --
+// ver CONTEXTO.md pro histórico de por que isso tinha sido removido antes e
+// por que a forma de trazer de volta (1 arquivo por vez, diskStorage, fila em
+// memória) é diferente e mais segura em RAM que a tentativa anterior.
+//
+// diskStorage (não memoryStorage) -- o arquivo vai direto pro disco temporário
+// do SO, nunca inteiro num Buffer da aplicação. Apagado no `finally`, sempre.
+const PIX_SERVIDOR_MAX_ARQUIVO_MB = Number(process.env.PIX_SERVIDOR_MAX_ARQUIVO_MB || 12);
+const uploadServidor = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, os.tmpdir()),
+    filename: (req, file, cb) => cb(null, `pix-servidor-${Date.now()}-${Math.random().toString(36).slice(2)}.pdf`),
+  }),
+  limits: { fileSize: PIX_SERVIDOR_MAX_ARQUIVO_MB * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype !== 'application/pdf') return cb(new Error('Envie um arquivo PDF'));
+    cb(null, true);
+  },
+});
+
+function uploadServidorComTratamentoDeErro(req, res, next) {
+  uploadServidor.single('pdf')(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: `PDF muito grande (limite: ${PIX_SERVIDOR_MAX_ARQUIVO_MB}MB por arquivo neste modo).` });
+    }
+    console.error('[pix] erro no upload de /extrair-servidor (multer):', err.message);
+    return res.status(400).json({ error: err.message || 'Erro ao processar o upload' });
+  });
+}
+
+router.post('/extrair-servidor', uploadServidorComTratamentoDeErro, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
+  const usuarioId = req.user.id;
+  const nomeOriginal = req.body?.arquivo || req.file.originalname || 'boleto.pdf';
+  const clienteId = req.body?.clienteId || undefined;
+  const caminhoTemp = req.file.path;
+
+  try {
+    const resultado = await extrairPixDeArquivoNoServidor(caminhoTemp);
+
+    if (!resultado) {
+      return res.status(200).json({ encontrado: false, arquivo: nomeOriginal });
+    }
+
+    const extracaoSalva = await persistirExtracaoPix({
+      usuarioId,
+      arquivo: nomeOriginal,
+      pixCopiaCola: resultado.pixCopiaCola,
+      clienteId,
+      origem: 'servidor',
+    });
+
+    res.status(201).json({ encontrado: true, ...extracaoSalva, pagina: resultado.pagina });
+  } catch (err) {
+    console.error('[pix] erro em /extrair-servidor:', err);
+    res.status(500).json({ error: err.message || 'Falha ao extrair o Pix no servidor' });
+  } finally {
+    // Apaga o temporário SEMPRE -- sucesso, falha ou "não encontrado". É o
+    // que garante que este endpoint nunca acumula PDFs em disco.
+    try { await fs.unlink(caminhoTemp); } catch (_) { /* já não existe / já foi limpo -- ok */ }
+  }
+});
 
 function serializar(linha) {
   return {

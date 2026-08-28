@@ -18,6 +18,8 @@ import {
 } from '../services/whatsapp.js';
 import { normalizarTelefone } from '../lib/telefone.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
+import { STATUS_BLOQUEIA_DISPARO } from '../lib/statusOperador.js';
+import { agregarContadores } from '../lib/agregarContadores.js';
 
 const router = Router();
 
@@ -25,24 +27,6 @@ const router = Router();
 // operador autenticado, preenchido pelo requireAuth em server.js). Não existe
 // mais parâmetro "slot" em lugar nenhum -- cada usuário tem 1 WhatsApp só, e
 // as funções de whatsapp.js/dispatchQueue.js já usam usuarioId como chave.
-
-// Agrega os contadores (enviados/entregues/lidos/falhas/numeros_invalidos/pendentes)
-// a partir das linhas de envio_itens -- usado tanto no resumo de um envio quanto
-// na listagem (montado em lote pra não fazer N+1 query).
-function agregarContadores(itens) {
-  const c = { total: 0, enviados: 0, entregues: 0, lidos: 0, falhas: 0, numeros_invalidos: 0, pendentes: 0, cancelados: 0 };
-  for (const item of itens) {
-    c.total++;
-    if (item.status === 'pendente') c.pendentes++;
-    if (item.status === 'erro') c.falhas++;
-    if (item.status === 'numero_invalido') c.numeros_invalidos++;
-    if (item.status === 'enviado') c.enviados++;
-    if (item.status === 'cancelado') c.cancelados++;
-    if (item.status_entrega === 'entregue' || item.status_entrega === 'lido') c.entregues++;
-    if (item.status_entrega === 'lido') c.lidos++;
-  }
-  return c;
-}
 
 function montarEnvioResumo(envio, contadores) {
   return {
@@ -61,7 +45,7 @@ function montarEnvioResumo(envio, contadores) {
 // Escopado por usuarioId: nunca deixa um cliente_id de outro usuário entrar
 // no lote, mesmo que ele venha (por engano ou má-fé) no corpo da requisição.
 //
-// Dois filtros de elegibilidade, aplicados sempre (independente de ter vindo
+// Três filtros de elegibilidade, aplicados sempre (independente de ter vindo
 // por cliente_ids solto ou por tag_ids):
 //   1) precisa ter PDF vinculado (`pdf_path`) -- cliente novo sem fatura
 //      ainda não entra; assim que o PDF é linkado (manual, extrator de Pix
@@ -69,6 +53,11 @@ function montarEnvioResumo(envio, contadores) {
 //      entrar automaticamente no PRÓXIMO lote montado, sem nenhum passo manual.
 //   2) não pode ter nenhuma tag com `permite_disparo = false` (ex.: Pago,
 //      Cancelado) -- ver migration-14-tags-controlam-disparo.sql.
+//   3) [2026-08] QUALIDADE: não pode estar com `status_operador` num valor
+//      que bloqueia disparo (ex.: pagamento_confirmado, numero_invalido,
+//      fraude, contrato_cancelado -- ver lib/statusOperador.js e
+//      migration-20-qualidade-tratativas.sql). Mesma ideia da tag, só que
+//      pelo desfecho registrado numa tratativa em vez de uma tag manual.
 // Retorna também quantos ficaram de fora por cada motivo, pra UI poder
 // avisar em vez de só devolver uma lista menor sem explicação.
 // `exigirPix`: quando true (lote `enviar_pix`), a elegibilidade passa a
@@ -93,7 +82,7 @@ async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, exigi
   // usuário ter sido colado no body da requisição.
   const { data: donos, error: donosError } = await supabase
     .from('clientes')
-    .select('id, pdf_path, pix_code')
+    .select('id, pdf_path, pix_code, status_operador')
     .in('id', [...conjunto])
     .eq('usuario_id', usuarioId);
   if (donosError) throw donosError;
@@ -113,6 +102,9 @@ async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, exigi
   if (tagsError) throw tagsError;
 
   const bloqueados = new Set((tagsBloqueando || []).map((r) => r.cliente_id));
+  for (const c of comPdf) {
+    if (c.status_operador && STATUS_BLOQUEIA_DISPARO.has(c.status_operador)) bloqueados.add(c.id);
+  }
   const liberados = comPdf.filter((c) => !bloqueados.has(c.id));
 
   return { clienteIds: liberados.map((c) => c.id), semPdf, bloqueadosPorTag: bloqueados.size };
@@ -210,7 +202,7 @@ router.post('/', async (req, res) => {
   if (!clienteIdsFinal.length) {
     const motivos = [];
     if (semPdf) motivos.push(enviarPix ? `${semPdf} sem PIX cadastrado` : `${semPdf} sem PDF vinculado`);
-    if (bloqueadosPorTag) motivos.push(`${bloqueadosPorTag} com tag que bloqueia disparo (ex.: Pago/Cancelado)`);
+    if (bloqueadosPorTag) motivos.push(`${bloqueadosPorTag} com tag ou status que bloqueia disparo (ex.: Pago/Cancelado/Fraude)`);
     const detalhe = motivos.length ? ` (${motivos.join(', ')})` : '';
     return res.status(400).json({ error: `nenhum cliente elegível pra disparo${detalhe}` });
   }

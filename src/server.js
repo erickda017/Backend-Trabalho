@@ -25,6 +25,7 @@ import supervisorRoutes from './routes/supervisor.routes.js';
 import arquivosRoutes from './routes/arquivos.routes.js';
 import faturasPendentesRoutes from './routes/faturasPendentes.routes.js';
 import safrasRoutes from './routes/safras.routes.js';
+import qualidadeRoutes from './routes/qualidade.routes.js';
 import { iniciarConsolidacaoSafras } from './lib/safras.js';
 
 dotenv.config();
@@ -116,6 +117,7 @@ app.use('/api/supervisor', requireAuth, requireSupervisor, supervisorRoutes);
 app.use('/api/arquivos', requireAuth, arquivosRoutes);
 app.use('/api/faturas', requireAuth, faturasPendentesRoutes);
 app.use('/api/safras', requireAuth, safrasRoutes);
+app.use('/api/qualidade', requireAuth, qualidadeRoutes);
 
 // Handler de erro global -- sem isso, erros como multer (arquivo grande demais, tipo
 // errado) ou qualquer exceção síncrona em uma rota caem no handler padrão do Express,

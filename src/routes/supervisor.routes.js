@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { supabase, urlsProxyArquivo } from '../lib/supabase.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
+import { achatarTags } from '../lib/achatarTags.js';
+import { agregarContadores as agregarContadoresBase } from '../lib/agregarContadores.js';
 
 // [2026-08] SUPERVISOR: único papel que enxerga dados de TODOS os operadores
 // (é uma operação única -- ver decisão no chat, não multi-empresa). Todo
@@ -9,23 +11,13 @@ import { escaparFiltroPostgrest } from '../lib/filtros.js';
 // nenhuma rota individual re-checa o papel.
 const router = Router();
 
+// [correção] 'numero_invalido' não caía em NENHUM contador antes -- sumia
+// dos totais do dashboard/disparos do Supervisor sem aparecer como falha nem
+// como pendente. Conta como falha aqui (a tela do Supervisor não tem uma
+// coluna própria pra isso, diferente da tela de Disparos do operador --
+// ver lib/agregarContadores.js pro motivo de existir o parâmetro).
 function agregarContadores(itens) {
-  const c = { total: 0, enviados: 0, entregues: 0, lidos: 0, falhas: 0, pendentes: 0, cancelados: 0 };
-  for (const item of itens) {
-    c.total++;
-    if (item.status === 'pendente') c.pendentes++;
-    // [correção] 'numero_invalido' não caía em NENHUM contador antes --
-    // sumia dos totais do dashboard/disparos do Supervisor sem aparecer
-    // como falha nem como pendente. Conta como falha aqui (a tela do
-    // Supervisor não tem uma coluna própria pra isso, diferente da tela de
-    // Disparos do operador).
-    if (item.status === 'erro' || item.status === 'numero_invalido') c.falhas++;
-    if (item.status === 'enviado') c.enviados++;
-    if (item.status === 'cancelado') c.cancelados++;
-    if (item.status_entrega === 'entregue' || item.status_entrega === 'lido') c.entregues++;
-    if (item.status_entrega === 'lido') c.lidos++;
-  }
-  return c;
+  return agregarContadoresBase(itens, { numeroInvalidoSeparado: false });
 }
 
 // Mapa usuario_id -> {email, nome} pra anexar "operador" nas respostas sem
@@ -163,16 +155,19 @@ router.get('/clientes', async (req, res) => {
     if (com_pdf === 'true' || com_pdf === '1') query = query.not('pdf_path', 'is', null);
     if (sem_pdf === 'true' || sem_pdf === '1') query = query.is('pdf_path', null);
 
-    const { data, error } = await query.range(from, to);
+    const { data, error, count } = await query.range(from, to);
     if (error) throw error;
 
     const operadores = await mapaOperadores();
-    const clientes = (data || []).map(({ cliente_tags, ...c }) => ({
-      ...c,
-      tags: (cliente_tags || []).map((ct) => ct.tags).filter(Boolean),
+    const clientes = (data || []).map((c) => ({
+      ...achatarTags(c),
       operador: operadores.get(c.usuario_id) || null,
     }));
-    res.json(clientes);
+    // [correção] resposta era um array cru -- com perPageDefault:1000, uma
+    // carteira maior que isso era cortada em silêncio, sem o front (que
+    // nunca mandava page/per_page) ter como saber que sobrou gente de fora.
+    // `total` deixa a paginação de verdade acontecer do lado do front.
+    res.json({ itens: clientes, total: count ?? clientes.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -194,7 +189,7 @@ router.get('/faturas', async (req, res) => {
     if (com_pdf === 'true' || com_pdf === '1') query = query.not('pdf_path', 'is', null);
     if (sem_pdf === 'true' || sem_pdf === '1') query = query.is('pdf_path', null);
 
-    const { data, error } = await query.range(from, to);
+    const { data, error, count } = await query.range(from, to);
     if (error) throw error;
 
     const linhas = data || [];
@@ -203,7 +198,10 @@ router.get('/faturas', async (req, res) => {
     // routes/arquivos.routes.js e o mesmo padrão em clientes/faturas.routes.js.
     const urls = urlsProxyArquivo('faturas', linhas.map((l) => l.pdf_path));
     const operadores = await mapaOperadores();
-    res.json(linhas.map((l, i) => ({ ...l, pdf_url: urls[i], operador: operadores.get(l.usuario_id) || null })));
+    const faturas = linhas.map((l, i) => ({ ...l, pdf_url: urls[i], operador: operadores.get(l.usuario_id) || null }));
+    // Mesmo motivo do GET /clientes acima: sem `total`, o front não tinha
+    // como paginar de verdade e a listagem cortava em silêncio no default.
+    res.json({ itens: faturas, total: count ?? faturas.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

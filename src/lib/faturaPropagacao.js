@@ -15,6 +15,10 @@ import { supabase } from './supabase.js';
 // NUNCA incluir `safra` aqui: é coluna GERADA no Postgres, um UPDATE nela
 // falha (e nem faria sentido -- ela se recalcula sozinha a partir de
 // data_prazo).
+// [2026-08] QUALIDADE: status_operador/status_operador_atualizado_em (ver
+// migration-20-qualidade-tratativas.sql) também são dado da FATURA -- uma
+// tratativa registrada num número precisa valer pro grupo inteiro, senão o
+// mesmo cliente apareceria "iniciado" numa linha e sem status na outra.
 const CAMPOS_FATURA = [
   'pdf_path',
   'pdf_atualizado_em',
@@ -26,6 +30,8 @@ const CAMPOS_FATURA = [
   'data_prazo',
   'numero_contrato',
   'data_contrato',
+  'status_operador',
+  'status_operador_atualizado_em',
 ];
 
 // Resolve o id "raiz" do grupo (a linha principal) a partir de qualquer

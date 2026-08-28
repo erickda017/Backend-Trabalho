@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { supabase, BUCKET, CHAT_BUCKET } from '../lib/supabase.js';
+import { supabase, BUCKET, CHAT_BUCKET, AVATAR_BUCKET } from '../lib/supabase.js';
 
 const router = Router();
 
@@ -35,6 +35,7 @@ const router = Router();
 const BUCKETS_PERMITIDOS = {
   faturas: BUCKET,
   'chat-midia': CHAT_BUCKET,
+  avatars: AVATAR_BUCKET,
 };
 
 router.get('/:bucketApelido/*', async (req, res) => {

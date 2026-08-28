@@ -23,6 +23,11 @@ export const BUCKET = process.env.SUPABASE_BUCKET || 'faturas';
 // enviados por lá) -- fica isolado do bucket de faturas (BUCKET) de propósito.
 export const CHAT_BUCKET = process.env.SUPABASE_CHAT_BUCKET || 'chat-midia';
 
+// [2026-08] Foto de perfil do operador (ver migration-21-perfil-avatar.sql)
+// -- 1 arquivo fixo por usuário (`${id}/avatar`), path próprio pra não
+// misturar com documento de cliente nos outros buckets.
+export const AVATAR_BUCKET = process.env.SUPABASE_AVATAR_BUCKET || 'avatars';
+
 // [2026-08] SEGURANÇA: os dois buckets acima guardam documentos com dados
 // pessoais de cliente (nome, endereço, CPF impresso no PDF da fatura/boleto,
 // fotos/áudios trocados no chat). Eles são PRIVADOS agora (ver migration de

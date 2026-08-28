@@ -4,6 +4,7 @@ import { supabase, BUCKET, CHAT_BUCKET, gerarSignedUrl, urlsProxyArquivo } from 
 import { enviarMensagemTexto, enviarMensagemComAnexo, validarNumero } from '../services/whatsapp.js';
 import { registrarMensagemSaida } from '../services/chatIngest.js';
 import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
+import { achatarTags } from '../lib/achatarTags.js';
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -38,9 +39,12 @@ function tipoPorMimetype(mimetype) {
 
 // Lista conversas, mais recente primeiro
 router.get('/conversas', async (req, res) => {
+  // [2026-08] QUALIDADE/CHAT: cliente_tags(tags(...)) junto pra mostrar a tag
+  // do cliente no card da lista e no cabeçalho da conversa aberta -- mesmo
+  // formato achatado (achatarTags) usado em clientes/qualidade/supervisor.
   const { data, error } = await supabase
     .from('conversas')
-    .select('*, clientes(nome, pdf_path, pix_code)')
+    .select('*, clientes(nome, pdf_path, pix_code, cliente_tags(tags(id, nome, cor)))')
     .eq('usuario_id', req.user.id)
     .order('ultima_mensagem_em', { ascending: false, nullsFirst: false });
 
@@ -51,7 +55,7 @@ router.get('/conversas', async (req, res) => {
   res.json(
     conversas.map((c, i) => ({
       ...c,
-      clientes: c.clientes ? { ...c.clientes, pdf_url: urls[i] } : null,
+      clientes: c.clientes ? { ...achatarTags(c.clientes), pdf_url: urls[i] } : null,
     })),
   );
 });
@@ -153,12 +157,12 @@ router.post('/conversas/:id/vincular-cliente', async (req, res) => {
     .update({ cliente_id: clienteId || null })
     .eq('id', id)
     .eq('usuario_id', usuarioId)
-    .select('*, clientes(nome, pdf_path, pix_code)')
+    .select('*, clientes(nome, pdf_path, pix_code, cliente_tags(tags(id, nome, cor)))')
     .maybeSingle();
 
   if (error) return res.status(500).json({ error: error.message });
   const urls = urlsProxyArquivo('faturas', [data?.clientes?.pdf_path || null]);
-  res.json({ ...data, clientes: data?.clientes ? { ...data.clientes, pdf_url: urls[0] } : null });
+  res.json({ ...data, clientes: data?.clientes ? { ...achatarTags(data.clientes), pdf_url: urls[0] } : null });
 });
 
 // Envia uma resposta pro cliente (texto e/ou anexo) e grava no histórico do chat

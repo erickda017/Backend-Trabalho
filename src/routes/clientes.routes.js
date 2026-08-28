@@ -11,6 +11,7 @@ import { casarClientePorNome, normalizarTexto } from '../lib/nomeMatch.js';
 import { cancelarItensPendentesDosClientes } from '../lib/tagsEfeito.js';
 import { sugerirPromocoesSpd, proximaDataMesmoDia } from '../lib/promocaoSpd.js';
 import { associarPendentesAoCliente } from '../lib/faturasPendentes.js';
+import { achatarTags } from '../lib/achatarTags.js';
 
 const router = Router();
 const upload = multer({
@@ -23,11 +24,6 @@ const upload = multer({
     cb(null, true);
   },
 });
-
-// Achata cliente_tags(tags(...)) pra um array simples `tags: [{id,nome,cor}]`
-function achatarTags({ cliente_tags, ...c }) {
-  return { ...c, tags: (cliente_tags || []).map((ct) => ct.tags).filter(Boolean) };
-}
 
 // [2026-08] SEGURANÇA: bucket "faturas" agora é privado. `pdf_url` nunca é lido
 // direto do banco (a coluna é deprecated, ver comment on column no schema) --

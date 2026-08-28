@@ -349,31 +349,53 @@ router.get('/', async (req, res) => {
 
   const clientesBase = (data || []).map(achatarTags);
 
-  // Contagem de disparos recebidos por cliente (só da página atual, pra não
-  // pesar a listagem inteira numa carteira grande) -- mostrada como badge na
-  // tela de Clientes.
+  // Contagem de disparos recebidos + status/data do ÚLTIMO envio, por cliente
+  // (só da página atual, pra não pesar a listagem inteira numa carteira
+  // grande) -- mostrados como badge/coluna na tela de Clientes (que agora
+  // também absorve a antiga tela de Faturas, ver CONTEXTO.md).
+  // [bug] `ultimo_envio_status`/`ultimo_envio_em` (tipados em lib/types.ts)
+  // nunca eram calculados em lugar nenhum do backend -- toda tela que os lia
+  // (ficha do cliente, ex-tela /faturas) sempre via "Sem envio"/"—", mesmo
+  // pra quem já tinha recebido disparo de verdade. Calculado aqui a partir da
+  // mesma consulta a envio_itens que já buscava a contagem, pegando por
+  // cliente o item de `created_at` mais recente (qualquer status -- "último
+  // envio" inclui erro/número inválido, não só sucesso).
   const idsDaPagina = clientesBase.map((c) => c.id);
   let contagemPorCliente = {};
+  let ultimoEnvioPorCliente = {};
   if (idsDaPagina.length) {
     const { data: enviosDoUsuario } = await supabase.from('envios').select('id').eq('usuario_id', req.user.id).limit(20000);
     const envioIdsDoUsuario = (enviosDoUsuario || []).map((e) => e.id);
     if (envioIdsDoUsuario.length) {
       const { data: itens } = await supabase
         .from('envio_itens')
-        .select('cliente_id')
+        .select('cliente_id, status, status_entrega, enviado_em, created_at')
         .in('envio_id', envioIdsDoUsuario)
         .in('cliente_id', idsDaPagina)
-        .eq('status', 'enviado')
         .limit(20000);
-      contagemPorCliente = (itens || []).reduce((acc, i) => {
-        acc[i.cliente_id] = (acc[i.cliente_id] || 0) + 1;
-        return acc;
-      }, {});
+
+      for (const item of itens || []) {
+        if (item.status === 'enviado') {
+          contagemPorCliente[item.cliente_id] = (contagemPorCliente[item.cliente_id] || 0) + 1;
+        }
+        const atual = ultimoEnvioPorCliente[item.cliente_id];
+        if (!atual || item.created_at > atual.created_at) {
+          ultimoEnvioPorCliente[item.cliente_id] = item;
+        }
+      }
     }
   }
 
   const clientes = await clientesComSignedUrls(
-    clientesBase.map((c) => ({ ...c, disparos_recebidos: contagemPorCliente[c.id] || 0 })),
+    clientesBase.map((c) => {
+      const ultimo = ultimoEnvioPorCliente[c.id];
+      return {
+        ...c,
+        disparos_recebidos: contagemPorCliente[c.id] || 0,
+        ultimo_envio_em: ultimo ? ultimo.enviado_em || ultimo.created_at : null,
+        ultimo_envio_status: ultimo ? ultimo.status_entrega || ultimo.status : null,
+      };
+    }),
   );
   res.json(clientes);
 });

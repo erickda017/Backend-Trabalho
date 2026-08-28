@@ -159,12 +159,23 @@ export async function calcularMetricasSafra(usuarioId, safra) {
 
   const totalFpd = principais.filter((c) => c.tipo_fatura === 'FPD').length;
   const totalSpd = principais.filter((c) => c.tipo_fatura === 'SPD').length;
-  const pagos = principais.filter((c) => (grupoPorPrincipal.get(c.id) || [c.id]).some((id) => pagosSet.has(id))).length;
+  const pagosPrincipais = principais.filter((c) => (grupoPorPrincipal.get(c.id) || [c.id]).some((id) => pagosSet.has(id)));
+  const pagos = pagosPrincipais.length;
   const receberamDisparo = principais.filter((c) => (grupoPorPrincipal.get(c.id) || [c.id]).some((id) => disparoSet.has(id))).length;
 
   const valores = principais.map((c) => Number(c.valor)).filter((v) => Number.isFinite(v));
   const valorTotal = valores.reduce((soma, v) => soma + v, 0);
   const valorMedio = valores.length ? valorTotal / valores.length : 0;
+
+  // [dashboard] "Valor em aberto" -- soma do `valor` só dos clientes SEM a
+  // tag "Pago" (mesmo conjunto que já calculamos acima pra `pagos`/
+  // `nao_pagos`, só reaproveitando os valores em vez de só contar). Não é
+  // uma métrica nova inventada: é a mesma régua de "pagou" que o resto do
+  // sistema já usa (tag "Pago"), só somando o campo `valor` em vez de contar
+  // clientes.
+  const valoresPagos = pagosPrincipais.map((c) => Number(c.valor)).filter((v) => Number.isFinite(v));
+  const valorRecebido = valoresPagos.reduce((soma, v) => soma + v, 0);
+  const valorEmAberto = valorTotal - valorRecebido;
 
   return {
     safra,
@@ -181,6 +192,8 @@ export async function calcularMetricasSafra(usuarioId, safra) {
     nao_receberam_disparo: principais.length - receberamDisparo,
     valor_total: Number(valorTotal.toFixed(2)),
     valor_medio: Number(valorMedio.toFixed(2)),
+    valor_recebido: Number(valorRecebido.toFixed(2)),
+    valor_em_aberto: Number(valorEmAberto.toFixed(2)),
     duplicidades_detectadas: contarDuplicidades(principais),
   };
 }

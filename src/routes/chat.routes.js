@@ -127,6 +127,40 @@ router.post('/conversas/:id/marcar-lida', async (req, res) => {
   res.json(data);
 });
 
+// [bug] Vincula manualmente uma conversa a um cliente cadastrado. Existe
+// porque a identificação automática (telefone/variantes com e sem 9º dígito,
+// resolução de @lid -- ver services/chatIngest.js) pode legitimamente falhar
+// (número que nunca bateu com nenhum cliente, ou @lid nunca resolvido), e
+// antes disso não tinha NENHUM jeito de corrigir pela tela -- o contato ficava
+// pra sempre mostrando só telefone/nome do WhatsApp, sem poder enviar fatura
+// nem aparecer corretamente em métricas por cliente. `cliente_id: null` no
+// corpo desvincula (volta a mostrar nome_contato/telefone).
+router.post('/conversas/:id/vincular-cliente', async (req, res) => {
+  const { id } = req.params;
+  const { cliente_id: clienteId } = req.body || {};
+  const usuarioId = req.user.id;
+
+  const { data: conversa } = await supabase.from('conversas').select('id').eq('id', id).eq('usuario_id', usuarioId).maybeSingle();
+  if (!conversa) return res.status(404).json({ error: 'conversa não encontrada' });
+
+  if (clienteId) {
+    const { data: cliente } = await supabase.from('clientes').select('id').eq('id', clienteId).eq('usuario_id', usuarioId).maybeSingle();
+    if (!cliente) return res.status(404).json({ error: 'cliente não encontrado' });
+  }
+
+  const { data, error } = await supabase
+    .from('conversas')
+    .update({ cliente_id: clienteId || null })
+    .eq('id', id)
+    .eq('usuario_id', usuarioId)
+    .select('*, clientes(nome, pdf_path, pix_code)')
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: error.message });
+  const urls = urlsProxyArquivo('faturas', [data?.clientes?.pdf_path || null]);
+  res.json({ ...data, clientes: data?.clientes ? { ...data.clientes, pdf_url: urls[0] } : null });
+});
+
 // Envia uma resposta pro cliente (texto e/ou anexo) e grava no histórico do chat
 router.post('/conversas/:id/mensagens', upload.single('anexo'), async (req, res) => {
   const { id } = req.params;

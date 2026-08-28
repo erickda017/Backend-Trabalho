@@ -1,5 +1,5 @@
 import { supabase, BUCKET, gerarSignedUrl } from '../lib/supabase.js';
-import { enviarMensagemComPdf, enviarMensagemTexto, validarNumero, isConnected } from './whatsapp.js';
+import { enviarMensagemComPdf, enviarMensagemTexto, validarNumero, isConnectedQualquerSlot, escolherSlotParaEnvio } from './whatsapp.js';
 import { dispararWebhook } from './webhook.js';
 import { registrarMensagemSaida } from './chatIngest.js';
 
@@ -139,8 +139,16 @@ async function enviarItem(item, envio, usuarioId) {
     mensagem = `${mensagem}\n\nPix copia e cola:\n${cliente.pix_code}`;
   }
 
+  // [2026-08] DOIS ZAPS: `envio.slot` (1|2) deixa o operador FIXAR um número
+  // pra este lote inteiro (ex.: campanha que precisa sair sempre do mesmo
+  // Zap); sem isso, cada item escolhe seu próprio slot via
+  // escolherSlotParaEnvio -- rodízio 50/50 quando os dois estão conectados,
+  // ou o único disponível quando só 1 está. Restaura a distribuição entre 2
+  // números que existia antes do multi-tenant (ver services/whatsapp.js).
+  const slot = envio.slot || escolherSlotParaEnvio(usuarioId) || 1;
+
   try {
-    const { existe, jid } = await validarNumero(cliente.telefone, usuarioId);
+    const { existe, jid } = await validarNumero(cliente.telefone, usuarioId, slot);
     if (!existe) {
       await supabase
         .from('envio_itens')
@@ -164,8 +172,9 @@ async function enviarItem(item, envio, usuarioId) {
           pdfUrl: pdfUrlAssinada,
           pdfNome: `fatura-${cliente.nome}.pdf`,
           usuarioId,
+          slot,
         })
-      : await enviarMensagemTexto({ numero: cliente.telefone, jid, mensagem, usuarioId });
+      : await enviarMensagemTexto({ numero: cliente.telefone, jid, mensagem, usuarioId, slot });
 
     // A partir daqui a mensagem JÁ FOI enviada de verdade pelo WhatsApp --
     // ver comentário em atualizarStatusEnviado sobre por que essa gravação
@@ -176,6 +185,9 @@ async function enviarItem(item, envio, usuarioId) {
       message_id: messageId,
       status_entrega: 'enviado',
       enviado_em: new Date().toISOString(),
+      // Registra qual dos 2 Zaps enviou de verdade -- coluna já existia
+      // (migration-4), só não era mais preenchida desde a virada single-Zap.
+      slot,
     });
     if (!statusGravado) {
       console.error(
@@ -286,7 +298,10 @@ export async function processarDisparo(envioId, usuarioId) {
         // fila inteira em erro por nada. Agora, se este usuário não tem WhatsApp
         // conectado, pausa (fica 'pendente' pra tentar de novo) e o scheduler.js
         // retoma sozinho quando -- e se -- a conexão voltar.
-        if (!isConnected(usuarioId)) {
+        // [2026-08] DOIS ZAPS: só pausa se NENHUM dos 2 estiver conectado --
+        // com 1 disponível, o disparo continua nele normalmente (ver
+        // escolherSlotParaEnvio em enviarItem).
+        if (!isConnectedQualquerSlot(usuarioId)) {
           const retomarEm = new Date(Date.now() + RECONEXAO_RETRY_MS);
           await supabase
             .from('envios')

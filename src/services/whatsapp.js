@@ -13,21 +13,50 @@ const logger = pino({ level: 'silent' });
 // Baileys manda status como número: 0=pendente 1=enviado(servidor) 2=entregue(dispositivo) 3=lido 4=reproduzido(audio)
 const STATUS_MAP = { 2: 'entregue', 3: 'lido', 4: 'lido' };
 
-// [2026-08] MULTI-TENANT: cada usuário (operador) tem exatamente 1 sessão de
-// WhatsApp própria. Isto substitui o antigo esquema de "slots" (1|2, números
-// fixos compartilhados por toda a operação) -- ver migration-13-multi-tenant.sql.
-// O padrão de estado (Map indexado por chave, guarda contra "sock fantasma",
-// reconexão automática) é o mesmo de antes; só a chave do Map mudou de
-// `slot` (number) para `usuarioId` (string, o auth.users.id do operador).
+// [2026-08] DOIS ZAPS POR TENANT: cada usuário (operador) pode ter até 2
+// sessões de WhatsApp (slot 1 e slot 2), distribuindo os disparos entre
+// ambas pra não concentrar volume num número só -- restaura a funcionalidade
+// que existia antes do multi-tenant (ver migration-4-slots-estrategia-pix.sql
+// e migration-13-multi-tenant.sql, que a desativou só pra simplificar a
+// virada multi-tenant, sem apagar dado). O padrão de estado (Map indexado
+// por chave, guarda contra "sock fantasma", reconexão automática) é o mesmo
+// de sempre; a chave do Map agora é `usuarioId` (slot 1, igual já era antes
+// -- NENHUMA sessão existente precisa de migração) ou `usuarioId:2` (slot 2,
+// novo). Slot 1 é sempre o "padrão" pra quem nunca configurou um segundo Zap
+// -- toda chamada que não passa slot explicitamente continua se comportando
+// exatamente como antes de dois Zaps existir.
 //
 // Nada aqui fica pareado sozinho no boot: cada operador precisa ter entrado
-// no sistema e clicado "conectar" ao menos uma vez (igual antes, só que por
-// usuário em vez de globalmente).
+// no sistema e clicado "conectar" ao menos uma vez por slot (igual antes, só
+// que agora até 2x por usuário).
 const sessoes = new Map();
 
-function estadoInicial(usuarioId) {
+const SLOT_PADRAO = 1;
+
+function slotValido(slot) {
+  return slot === 2 ? 2 : SLOT_PADRAO;
+}
+
+// slot 1 usa a MESMA chave de sempre (bare usuarioId) -- sessão existente de
+// quem já usava o sistema antes de dois Zaps continua funcionando sem
+// nenhuma migração de dado. slot 2 é uma chave nova, só existe pra quem
+// configurar o segundo número.
+function chaveSessao(usuarioId, slot) {
+  return slotValido(slot) === 2 ? `${usuarioId}:2` : usuarioId;
+}
+
+// Desfaz chaveSessao() -- usado no boot (startWhatsApp) pra descobrir de
+// volta usuarioId+slot a partir do session_id salvo no banco. UUID de
+// usuário nunca contém ":", então esse split é seguro.
+function decomporChaveSessao(chave) {
+  if (chave.endsWith(':2')) return { usuarioId: chave.slice(0, -2), slot: 2 };
+  return { usuarioId: chave, slot: SLOT_PADRAO };
+}
+
+function estadoInicial(usuarioId, slot) {
   return {
     usuarioId,
+    slot,
     sock: null,
     lastQr: null,
     status: 'disconnected', // disconnected | connecting | qr | connected
@@ -41,10 +70,21 @@ function estadoInicial(usuarioId) {
   };
 }
 
-function getEstado(usuarioId) {
+function getEstado(usuarioId, slot = SLOT_PADRAO) {
   if (!usuarioId) throw new Error('usuarioId é obrigatório para operações de WhatsApp');
-  if (!sessoes.has(usuarioId)) sessoes.set(usuarioId, estadoInicial(usuarioId));
-  return sessoes.get(usuarioId);
+  const chave = chaveSessao(usuarioId, slot);
+  if (!sessoes.has(chave)) sessoes.set(chave, estadoInicial(usuarioId, slotValido(slot)));
+  return sessoes.get(chave);
+}
+
+// Quais slots (1, ou 1 e 2) já têm sessão conhecida (conectada ou não) na
+// memória pra um usuário -- usado pra decidir se vale a pena tentar o slot 2
+// em getSocketParaEnvio/isConnected.
+function slotsConhecidos(usuarioId) {
+  const slots = [];
+  if (sessoes.has(chaveSessao(usuarioId, 1))) slots.push(1);
+  if (sessoes.has(chaveSessao(usuarioId, 2))) slots.push(2);
+  return slots;
 }
 
 // Sobe, no boot do servidor, as sessões que já têm credenciais salvas
@@ -60,27 +100,30 @@ export async function startWhatsApp() {
     return;
   }
 
-  const usuarioIds = [...new Set((data || []).map((r) => r.session_id))];
-  for (const usuarioId of usuarioIds) {
-    const estado = getEstado(usuarioId);
+  const chaves = [...new Set((data || []).map((r) => r.session_id))];
+  for (const chave of chaves) {
+    const { usuarioId, slot } = decomporChaveSessao(chave);
+    const estado = getEstado(usuarioId, slot);
     estado.configurada = true;
-    await conectarUsuario(usuarioId).catch((err) =>
-      console.error(`[whatsapp] erro ao reconectar usuário ${usuarioId} no boot:`, err.message)
+    await conectarUsuario(usuarioId, slot).catch((err) =>
+      console.error(`[whatsapp] erro ao reconectar usuário ${usuarioId} (slot ${slot}) no boot:`, err.message)
     );
   }
 }
 
-export async function conectarUsuario(usuarioId) {
+export async function conectarUsuario(usuarioId, slot = SLOT_PADRAO) {
   if (!usuarioId) throw new Error('usuarioId é obrigatório');
+  slot = slotValido(slot);
 
-  const estado = getEstado(usuarioId);
-  if (estado.status === 'connecting' || estado.status === 'connected') return getStatusUsuario(usuarioId);
+  const estado = getEstado(usuarioId, slot);
+  if (estado.status === 'connecting' || estado.status === 'connected') return getStatusUsuario(usuarioId, slot);
 
   estado.status = 'connecting';
 
-  // session_id da tabela whatsapp_sessions passa a SER o usuarioId -- cada
-  // operador com sua própria linha de credenciais, totalmente isolada.
-  const { state, saveCreds, clearState } = await useSupabaseAuthState(usuarioId);
+  // session_id da tabela whatsapp_sessions é `usuarioId` (slot 1) ou
+  // `usuarioId:2` (slot 2) -- ver chaveSessao(). Cada slot de cada operador
+  // com sua própria linha de credenciais, totalmente isolada.
+  const { state, saveCreds, clearState } = await useSupabaseAuthState(chaveSessao(usuarioId, slot));
   estado.clearAuthState = clearState;
 
   const sock = makeWASocket({
@@ -118,7 +161,7 @@ export async function conectarUsuario(usuarioId) {
       estado.telefone = normalizarTelefone(sock.user?.id?.split(':')[0] || sock.user?.id || '') || null;
       estado.nome = sock.user?.name || sock.user?.notify || null;
       estado.ultimaConexao = new Date().toISOString();
-      console.log(`[whatsapp] usuário ${usuarioId} conectado`);
+      console.log(`[whatsapp] usuário ${usuarioId} (slot ${slot}) conectado`);
     }
 
     if (connection === 'close') {
@@ -129,10 +172,10 @@ export async function conectarUsuario(usuarioId) {
       // auto-reconnect abaixo podia vencer a corrida com o logout manual e
       // religar a sessão segundos depois, dando a impressão de botão travado.
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !estado.desconectandoManual;
-      console.log(`[whatsapp] usuário ${usuarioId} conexão fechada. Reconectar?`, shouldReconnect);
+      console.log(`[whatsapp] usuário ${usuarioId} (slot ${slot}) conexão fechada. Reconectar?`, shouldReconnect);
       if (shouldReconnect) {
-        conectarUsuario(usuarioId).catch((err) =>
-          console.error(`[whatsapp] erro ao reconectar usuário ${usuarioId}:`, err.message)
+        conectarUsuario(usuarioId, slot).catch((err) =>
+          console.error(`[whatsapp] erro ao reconectar usuário ${usuarioId} (slot ${slot}):`, err.message)
         );
       }
     }
@@ -210,11 +253,11 @@ export async function conectarUsuario(usuarioId) {
     }
   });
 
-  return getStatusUsuario(usuarioId);
+  return getStatusUsuario(usuarioId, slot);
 }
 
-export function getStatusUsuario(usuarioId) {
-  const e = getEstado(usuarioId);
+export function getStatusUsuario(usuarioId, slot = SLOT_PADRAO) {
+  const e = getEstado(usuarioId, slot);
   return {
     configurada: e.configurada,
     status: e.status,
@@ -226,20 +269,60 @@ export function getStatusUsuario(usuarioId) {
   };
 }
 
-export function getSocket(usuarioId) {
-  const e = getEstado(usuarioId);
+// Status dos 2 slots de uma vez -- usado pela tela de Conexão, que agora
+// mostra 2 cards (ver frontend). Slot 2 só é "relevante" (aparece como algo
+// além de disconnected/nunca configurado) se o operador algum dia clicou
+// conectar nele -- não polui a tela de quem usa só 1 número.
+export function getStatusAmbosSlots(usuarioId) {
+  return { 1: getStatusUsuario(usuarioId, 1), 2: getStatusUsuario(usuarioId, 2) };
+}
+
+export function getSocket(usuarioId, slot = SLOT_PADRAO) {
+  const e = getEstado(usuarioId, slot);
   if (!e.sock || e.status !== 'connected') {
-    throw new Error('WhatsApp não conectado. Conecte seu número na tela de Configurações.');
+    throw new Error(`WhatsApp (slot ${slotValido(slot)}) não conectado. Conecte seu número na tela de Configurações.`);
   }
   return e.sock;
 }
 
-export function isConnected(usuarioId) {
-  return getEstado(usuarioId).status === 'connected';
+export function isConnected(usuarioId, slot = SLOT_PADRAO) {
+  return getEstado(usuarioId, slot).status === 'connected';
 }
 
-export async function logoutUsuario(usuarioId) {
-  const e = getEstado(usuarioId);
+// Verdadeiro se PELO MENOS UM dos 2 slots está conectado -- usado pra decidir
+// se um disparo deve pausar por falta de conexão (só pausa se os DOIS
+// estiverem fora, já que com 1 disponível o disparo continua nele).
+export function isConnectedQualquerSlot(usuarioId) {
+  return isConnected(usuarioId, 1) || isConnected(usuarioId, 2);
+}
+
+// Cursor de rodízio (round-robin) do slot 1/2, por usuário -- só em memória
+// de propósito: perder esse cursor num redeploy só faz a alternância
+// reiniciar do slot 1, sem nenhum risco de duplicar/perder disparo (quem
+// decide o que já foi enviado é o status em `envio_itens`, não isto aqui).
+const proximoSlotPorUsuario = new Map();
+
+// Escolhe qual slot usar pro PRÓXIMO envio de um usuário: se só 1 dos 2
+// estiver conectado, usa esse (nem tenta o outro); se os 2 estiverem
+// conectados, alterna 50/50 entre eles; se nenhum estiver, devolve null (quem
+// chama decide pausar o disparo). Restaura o comportamento antigo de
+// distribuir carga entre 2 números (ver migration-4/lib/estrategia.js,
+// versão pré-multi-tenant), agora por tenant em vez de global.
+export function escolherSlotParaEnvio(usuarioId) {
+  const slot1 = isConnected(usuarioId, 1);
+  const slot2 = isConnected(usuarioId, 2);
+  if (slot1 && !slot2) return 1;
+  if (slot2 && !slot1) return 2;
+  if (!slot1 && !slot2) return null;
+
+  const proximo = proximoSlotPorUsuario.get(usuarioId) === 2 ? 2 : 1;
+  proximoSlotPorUsuario.set(usuarioId, proximo === 1 ? 2 : 1);
+  return proximo;
+}
+
+export async function logoutUsuario(usuarioId, slot = SLOT_PADRAO) {
+  slot = slotValido(slot);
+  const e = getEstado(usuarioId, slot);
   e.desconectandoManual = true;
   if (e.sock) {
     const sockAntigo = e.sock;
@@ -250,24 +333,25 @@ export async function logoutUsuario(usuarioId) {
     try {
       await sockAntigo.logout();
     } catch (err) {
-      console.error(`[whatsapp] erro ao encerrar sessão do usuário ${usuarioId}:`, err.message);
+      console.error(`[whatsapp] erro ao encerrar sessão do usuário ${usuarioId} (slot ${slot}):`, err.message);
     }
   }
   if (e.clearAuthState) await e.clearAuthState();
 
-  sessoes.set(usuarioId, estadoInicial(usuarioId));
-  return getStatusUsuario(usuarioId);
+  sessoes.set(chaveSessao(usuarioId, slot), estadoInicial(usuarioId, slot));
+  return getStatusUsuario(usuarioId, slot);
 }
 
-// Libera da memória o estado de um usuário que ficou muito tempo desconectado
-// (evita o Map crescer pra sempre num servidor de longa duração com muitos
-// operadores passando por ali). Só remove do Map -- não mexe nas credenciais
-// salvas no banco, então da próxima vez que o usuário abrir o sistema a gente
-// reconecta normalmente sem pedir QR de novo.
-export function liberarSessaoInativa(usuarioId) {
-  const e = sessoes.get(usuarioId);
+// Libera da memória o estado de uma sessão (usuarioId+slot) que ficou muito
+// tempo desconectada (evita o Map crescer pra sempre num servidor de longa
+// duração com muitos operadores passando por ali). Só remove do Map -- não
+// mexe nas credenciais salvas no banco, então da próxima vez que o usuário
+// abrir o sistema a gente reconecta normalmente sem pedir QR de novo.
+export function liberarSessaoInativa(usuarioId, slot = SLOT_PADRAO) {
+  const chave = chaveSessao(usuarioId, slot);
+  const e = sessoes.get(chave);
   if (e && e.status === 'disconnected' && !e.sock) {
-    sessoes.delete(usuarioId);
+    sessoes.delete(chave);
   }
 }
 
@@ -280,15 +364,16 @@ export function liberarSessaoInativa(usuarioId) {
 const INTERVALO_LIMPEZA_SESSOES_MS = 30 * 60 * 1000;
 export function iniciarLimpezaSessoesInativas() {
   setInterval(() => {
-    for (const usuarioId of [...sessoes.keys()]) {
-      liberarSessaoInativa(usuarioId);
+    for (const chave of [...sessoes.keys()]) {
+      const { usuarioId, slot } = decomporChaveSessao(chave);
+      liberarSessaoInativa(usuarioId, slot);
     }
   }, INTERVALO_LIMPEZA_SESSOES_MS);
 }
 
 // Verifica se o número existe no WhatsApp antes de tentar enviar.
-export async function validarNumero(numero, usuarioId) {
-  const socket = getSocket(usuarioId);
+export async function validarNumero(numero, usuarioId, slot = SLOT_PADRAO) {
+  const socket = getSocket(usuarioId, slot);
   const comCodigoPais = normalizarTelefone(numero);
 
   const [resultado] = await socket.onWhatsApp(comCodigoPais);
@@ -298,8 +383,8 @@ export async function validarNumero(numero, usuarioId) {
 // IMPORTANTE: `jid` deve vir de validarNumero() sempre que possível -- é o JID
 // REAL confirmado pelo WhatsApp via onWhatsApp(), que pode divergir do que
 // formatJid(numero) monta na mão.
-export async function enviarMensagemComPdf({ numero, jid, mensagem, pdfUrl, pdfNome, usuarioId }) {
-  const socket = getSocket(usuarioId);
+export async function enviarMensagemComPdf({ numero, jid, mensagem, pdfUrl, pdfNome, usuarioId, slot = SLOT_PADRAO }) {
+  const socket = getSocket(usuarioId, slot);
   const destino = jid || formatJid(numero);
 
   const enviada = await socket.sendMessage(destino, {
@@ -309,21 +394,23 @@ export async function enviarMensagemComPdf({ numero, jid, mensagem, pdfUrl, pdfN
     caption: mensagem,
   });
 
-  getEstado(usuarioId).mensagensEnviadas += 1;
+  getEstado(usuarioId, slot).mensagensEnviadas += 1;
   return { messageId: enviada?.key?.id || null };
 }
 
-export async function enviarMensagemTexto({ numero, jid, mensagem, usuarioId }) {
-  const socket = getSocket(usuarioId);
+export async function enviarMensagemTexto({ numero, jid, mensagem, usuarioId, slot = SLOT_PADRAO }) {
+  const socket = getSocket(usuarioId, slot);
   const destino = jid || formatJid(numero);
   const enviada = await socket.sendMessage(destino, { text: mensagem });
-  getEstado(usuarioId).mensagensEnviadas += 1;
+  getEstado(usuarioId, slot).mensagensEnviadas += 1;
   return { messageId: enviada?.key?.id || null };
 }
 
-// Envio genérico usado pelo Chat (resposta ao cliente).
-export async function enviarMensagemComAnexo({ numero, jid, mensagem, anexoUrl, anexoNome, anexoTipo, anexoMimetype, usuarioId }) {
-  const socket = getSocket(usuarioId);
+// Envio genérico usado pelo Chat (resposta ao cliente). Sem slot explícito
+// (Chat ainda não escolhe -- ver limitação no comentário de dispatchQueue.js)
+// sempre responde pelo slot 1, igual ao comportamento de antes de dois Zaps.
+export async function enviarMensagemComAnexo({ numero, jid, mensagem, anexoUrl, anexoNome, anexoTipo, anexoMimetype, usuarioId, slot = SLOT_PADRAO }) {
+  const socket = getSocket(usuarioId, slot);
   const destino = jid || formatJid(numero);
 
   let payload;
@@ -343,6 +430,6 @@ export async function enviarMensagemComAnexo({ numero, jid, mensagem, anexoUrl, 
   }
 
   const enviada = await socket.sendMessage(destino, payload);
-  getEstado(usuarioId).mensagensEnviadas += 1;
+  getEstado(usuarioId, slot).mensagensEnviadas += 1;
   return { messageId: enviada?.key?.id || null };
 }

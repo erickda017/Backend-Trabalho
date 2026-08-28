@@ -12,6 +12,7 @@ import { cancelarItensPendentesDosClientes } from '../lib/tagsEfeito.js';
 import { sugerirPromocoesSpd, proximaDataMesmoDia } from '../lib/promocaoSpd.js';
 import { associarPendentesAoCliente } from '../lib/faturasPendentes.js';
 import { achatarTags } from '../lib/achatarTags.js';
+import { iniciarVerificacao, statusVerificacao } from '../services/verificacaoVencimentos.js';
 
 const router = Router();
 const upload = multer({
@@ -74,19 +75,6 @@ router.post('/converter-lista', (req, res) => {
   res.json({ itens, avisos, total: itens.length });
 });
 
-// Formata uma data ISO ('2026-09-24') pro padrar brasileiro de exibição
-// ('24/09/2026') -- mesmo formato que a coluna `vencimento` (texto livre) já
-// usa em todo o resto do sistema (mensagem interpolada, telas). Mantém
-// `vencimento` alimentado mesmo pra quem entra pela lista crua, que antes
-// desta feature nunca preenchia esse campo.
-function formatarDataIsoParaBr(iso) {
-  if (!iso || typeof iso !== 'string') return null;
-  const match = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!match) return null;
-  const [, ano, mes, dia] = match;
-  return `${dia}/${mes}/${ano}`;
-}
-
 // Importa direto os itens já convertidos/revisados (upsert por telefone --
 // mesmo comportamento do resto do sistema, não duplica cliente). Não grava
 // PDF nenhum aqui -- isso continua casando depois pelo fluxo normal de
@@ -98,9 +86,14 @@ function formatarDataIsoParaBr(iso) {
 // tipo_fatura (FPD/SPD), data_prazo e numero_contrato quando a lista crua
 // trouxer essa informação (ver lib/parseListaClientes.js e
 // migration-19-safras-faturas.sql). `safra` é coluna GERADA a partir de
-// data_prazo -- nunca é enviada no upsert. Também alimenta `vencimento`
-// (texto de exibição/mensagem) a partir de data_prazo, que este fluxo nunca
-// preenchia antes.
+// data_prazo -- nunca é enviada no upsert.
+// [CRÍTICO] `vencimento` NÃO é preenchido a partir de `data_prazo` aqui --
+// são conceitos diferentes (a data que vem na lista crua é o PRAZO final,
+// não o vencimento original da fatura; o vencimento costuma ser ~30 dias
+// ANTES do prazo). Preencher `vencimento` = `data_prazo` foi um bug real
+// desta feature (ficava mostrando/mandando na mensagem uma data ~30 dias
+// divergente da real). `vencimento` só é preenchido pela verificação real
+// do PDF (ver services/verificacaoVencimentos.js) ou por cadastro manual.
 router.post('/importar-lista', async (req, res) => {
   const { itens } = req.body || {};
   if (!Array.isArray(itens) || itens.length === 0) {
@@ -132,7 +125,6 @@ router.post('/importar-lista', async (req, res) => {
           data_prazo: item.data_prazo ?? null,
           numero_contrato: item.numero_contrato ?? null,
           data_contrato: item.data_contrato ?? null,
-          ...(item.data_prazo ? { vencimento: formatarDataIsoParaBr(item.data_prazo) } : {}),
         },
         { onConflict: 'usuario_id,telefone' },
       )
@@ -160,7 +152,6 @@ router.post('/importar-lista', async (req, res) => {
         data_prazo: item.data_prazo ?? null,
         numero_contrato: item.numero_contrato ?? null,
         data_contrato: item.data_contrato ?? null,
-        ...(item.data_prazo ? { vencimento: formatarDataIsoParaBr(item.data_prazo) } : {}),
       });
     } catch (propagacaoError) {
       console.error('[clientes] erro ao propagar fatura no import da lista crua:', propagacaoError.message);
@@ -269,6 +260,23 @@ router.post('/importar-pagos', async (req, res) => {
     nao_encontrados: naoEncontrados,
     sugestoes_spd: sugestoesSpd,
   });
+});
+
+// [CRÍTICO] "Rodar verificação" de vencimento -- varre os PDFs já anexados
+// (`pdf_path`) e tenta achar a data de vencimento real impressa no boleto
+// via OCR (mesmo Worker/lógica do Extrator de PIX, ver
+// services/verificacaoVencimentos.js). NUNCA mexe em `data_prazo` -- só
+// preenche `vencimento`, que é um dado diferente (ver comentário em
+// POST /importar-lista). Roda em background (job em memória, 1 por
+// usuário) -- devolve na hora, o front consulta o progresso pelo GET abaixo.
+router.post('/verificar-vencimentos', (req, res) => {
+  const apenasPendentes = req.body?.apenas_pendentes !== false;
+  const estado = iniciarVerificacao(req.user.id, { apenasPendentes });
+  res.status(202).json(estado);
+});
+
+router.get('/verificar-vencimentos/status', (req, res) => {
+  res.json(statusVerificacao(req.user.id));
 });
 
 router.get('/', async (req, res) => {
@@ -644,10 +652,14 @@ router.post('/:id/promover-spd', async (req, res) => {
     return res.status(400).json({ error: 'Não foi possível calcular a nova data de prazo -- informe "data_prazo" no corpo da requisição' });
   }
 
+  // [CRÍTICO] Não sobrescreve `vencimento` aqui -- é o prazo do NOVO ciclo
+  // (SPD), não o vencimento real da fatura (ver comentário em
+  // POST /importar-lista sobre por que esses dois campos são diferentes).
+  // O vencimento do SPD só é conhecido de verdade quando o PDF/boleto dessa
+  // fatura for anexado e verificado.
   const { data, error } = await propagarDadosFatura(id, req.user.id, {
     tipo_fatura: 'SPD',
     data_prazo: novaData,
-    vencimento: formatarDataIsoParaBr(novaData),
   });
   if (error) return res.status(500).json({ error: error.message });
   const clienteAtualizado = (data || []).find((c) => c.id === id) || data?.[0];

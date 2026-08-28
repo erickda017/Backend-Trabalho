@@ -73,7 +73,10 @@ export function executarSequencial(tarefa) {
 }
 
 let pdfjsLibPromise = null;
-async function carregarPdfjs() {
+// Exportado pra reuso por outros serviços que também precisam renderizar PDF
+// no servidor (ver services/verificacaoVencimentos.js) -- evita duplicar a
+// lógica de carregamento/cache do módulo pdfjs-dist.
+export async function carregarPdfjs() {
   if (!pdfjsLibPromise) {
     // Build "legacy" -- sem dependência de Worker/DOM do navegador, feita
     // pra rodar em Node. Import dinâmico (não no topo do módulo) só por
@@ -85,7 +88,7 @@ async function carregarPdfjs() {
 }
 
 let canvasLibPromise = null;
-async function carregarCanvas() {
+export async function carregarCanvas() {
   if (!canvasLibPromise) {
     canvasLibPromise = import('@napi-rs/canvas');
   }
@@ -97,7 +100,7 @@ async function carregarCanvas() {
 // pdfjs espera (create/reset/destroy), usando @napi-rs/canvas (binário
 // pré-compilado, sem precisar de libs nativas do sistema tipo Cairo/Pango --
 // diferente do pacote `canvas` clássico, mais pesado de instalar no Render).
-function criarFabricaCanvas(createCanvas) {
+export function criarFabricaCanvas(createCanvas) {
   return {
     create(width, height) {
       const canvas = createCanvas(width, height);

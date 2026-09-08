@@ -38,6 +38,42 @@ const BUCKETS_PERMITIDOS = {
   avatars: AVATAR_BUCKET,
 };
 
+// [2026-09] CRÍTICO: antes desta checagem, esta era a ÚNICA rota do backend
+// que não confirmava se o recurso pedido pertence ao usuario_id logado --
+// qualquer operador autenticado que soubesse (ou adivinhasse) o path de um
+// arquivo de OUTRO operador conseguia baixá-lo, quebrando o isolamento
+// multi-tenant que todo o resto do sistema (clientes/envios/chat/...)
+// implementa com cuidado. Agravado na prática porque o UUID do dono aparece
+// literalmente no path de `faturas_pendentes` e é devolvido por
+// `GET /supervisor/operadores`.
+//
+// Cada bucket guarda o path numa convenção diferente:
+//   - `chat-midia` / `avatars`: SEMPRE `<usuario_id>/...` (ver
+//     chat.routes.js / perfil.routes.js) -- checagem é só prefixo.
+//   - `faturas`: TRÊS convenções coexistem, todas legadas de features
+//     diferentes: `<cliente_id>/...` (upload manual/avulso/extrator, ver
+//     clientes.routes.js/faturasPendentes.routes.js), `<usuario_id>/...`
+//     (importação em lote client-side, ver importacao.routes.js) e
+//     `pendentes/<usuario_id>/...` (fatura avulsa ainda sem cliente
+//     casado). Só o caso `<cliente_id>/...` precisa de consulta ao banco
+//     pra confirmar o dono -- os outros dois resolvem só olhando o path.
+async function caminhoPertenceAoUsuario(bucketApelido, path, usuarioId) {
+  const primeiroSegmento = path.split('/')[0];
+
+  if (bucketApelido === 'chat-midia' || bucketApelido === 'avatars') {
+    return primeiroSegmento === usuarioId;
+  }
+
+  // bucketApelido === 'faturas' a partir daqui.
+  if (primeiroSegmento === 'pendentes') {
+    return path.split('/')[1] === usuarioId;
+  }
+  if (primeiroSegmento === usuarioId) return true;
+
+  const { data } = await supabase.from('clientes').select('id').eq('id', primeiroSegmento).eq('usuario_id', usuarioId).maybeSingle();
+  return Boolean(data);
+}
+
 router.get('/:bucketApelido/*', async (req, res) => {
   const bucketReal = BUCKETS_PERMITIDOS[req.params.bucketApelido];
   if (!bucketReal) {
@@ -52,6 +88,17 @@ router.get('/:bucketApelido/*', async (req, res) => {
   const path = req.params[0];
   if (!path) {
     return res.status(400).json({ error: 'path do arquivo ausente' });
+  }
+
+  // Supervisor já enxerga cliente/PDF de QUALQUER operador em outras rotas
+  // (ex.: GET /supervisor/clientes monta proxy URL de `faturas` de todo
+  // mundo) -- segue liberado aqui, senão essa tela quebraria. Pra qualquer
+  // outro papel, 404 (não 403) pra não confirmar que o arquivo existe.
+  if (req.user.role !== 'supervisor') {
+    const pertence = await caminhoPertenceAoUsuario(req.params.bucketApelido, path, req.user.id);
+    if (!pertence) {
+      return res.status(404).json({ error: 'arquivo não encontrado' });
+    }
   }
 
   try {

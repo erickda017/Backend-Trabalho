@@ -50,7 +50,7 @@ export function encontrarClientesPorNome(alvoNormalizado, clientes) {
 // critério PRINCIPAL de identificação quando disponível -- é isso que
 // resolve duas pessoas de mesmo nome (mas contratos diferentes) sem
 // conflito: se `numeroContrato` vier preenchido e bater com o
-// `numero_contrato` de algum cliente, é ele, ponto, nem olha pro nome.
+// `numero_contrato` de exatamente um cliente, é ele, nem olha pro nome.
 //
 // Nome só entra como fallback (quando não há contrato pra desempatar, ou
 // nenhum cliente tem esse contrato ainda cadastrado), e só resolve sozinho
@@ -71,8 +71,18 @@ export function casarCliente({ nome, arquivo, numeroContrato, clientes }) {
   if (numeroContrato != null) {
     const alvoContrato = String(numeroContrato).replace(/\D/g, '');
     if (alvoContrato) {
-      const porContrato = lista.find((c) => c.numero_contrato && String(c.numero_contrato).replace(/\D/g, '') === alvoContrato);
-      if (porContrato) return { cliente: porContrato, status: 'contrato' };
+      // [2026-09] Antes usava `.find()` -- pegava o primeiro cliente com
+      // esse contrato sem checar se havia mais de um (ex.: duplicata por
+      // erro de digitação numa lista colada). O banco agora tem uma
+      // constraint de unicidade em (usuario_id, numero_contrato) pra dado
+      // NOVO (ver migration-22), mas dado antigo já cadastrado antes dela
+      // ainda pode ter duplicata -- aqui trata do mesmo jeito que nome
+      // duplicado: 2+ candidatos vira ambíguo, não adivinha.
+      const candidatosPorContrato = lista.filter(
+        (c) => c.numero_contrato && String(c.numero_contrato).replace(/\D/g, '') === alvoContrato,
+      );
+      if (candidatosPorContrato.length === 1) return { cliente: candidatosPorContrato[0], status: 'contrato' };
+      if (candidatosPorContrato.length > 1) return { cliente: null, status: 'ambiguo', candidatos: candidatosPorContrato };
     }
   }
 

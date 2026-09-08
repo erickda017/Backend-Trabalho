@@ -374,7 +374,7 @@ router.get('/', async (req, res) => {
     }
   }
 
-  const { data, error } = await query.range(from, to);
+  const { data, error, count } = await query.range(from, to);
   if (error) return res.status(500).json({ error: error.message });
 
   const clientesBase = (data || []).map(achatarTags);
@@ -427,7 +427,13 @@ router.get('/', async (req, res) => {
       };
     }),
   );
-  res.json(clientes);
+  // [2026-09 CRÍTICO] Antes devolvia só o array (`res.json(clientes)`), sem
+  // `total` -- acima do perPageDefault (1000), a lista vinha CORTADA sem
+  // nenhum sinal disso pro front perceber (filtro/contagem/"selecionar
+  // todos"/dashboard operavam sobre uma fatia da carteira). Mesmo padrão já
+  // usado em GET /supervisor/faturas -- ver lib/clientesPaginados.ts no
+  // front, que pagina até trazer tudo usando esse total.
+  res.json({ itens: clientes, total: count ?? clientes.length });
 });
 
 // Busca um cliente específico

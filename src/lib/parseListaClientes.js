@@ -179,11 +179,15 @@ function pareceContrato(digitos) {
 // Extrai só os NOMES de uma lista "crua" no mesmo formato reconhecido acima
 // (bloco NOME/contrato/CPF/telefone(s)/Fatura/valor, em linhas separadas OU
 // tudo numa linha só) -- usado por fluxos que só precisam CASAR com um
-// cliente já cadastrado (ex: POST /clientes/importar-pagos), não criar
-// cliente novo, então contrato/CPF/telefone(s)/Fatura/valor são só ruído a
-// ignorar; cada segmento classificado como nome (`ehLinhaNome`) vira um item,
-// sem depender de posição/estado -- por isso também aceita, sem nenhuma
-// mudança, o formato simples "1 nome por linha" que este fluxo já suportava.
+// cliente já cadastrado, não criar cliente novo, então contrato/CPF/
+// telefone(s)/Fatura/valor são só ruído a ignorar; cada segmento classificado
+// como nome (`ehLinhaNome`) vira um item, sem depender de posição/estado --
+// por isso também aceita, sem nenhuma mudança, o formato simples "1 nome por
+// linha" que este fluxo já suportava.
+// [2026-09] Mantida por compatibilidade, mas quem precisa desambiguar
+// clientes de mesmo nome (ex.: POST /clientes/importar-pagos) deve usar
+// `extrairNomesEContratosDeListaCrua` abaixo -- essa aqui não tem como
+// devolver o contrato pareado com o nome, porque não agrupa por bloco.
 export function extrairNomesDeListaCrua(textoCru) {
   const linhas = String(textoCru || '').split(/\r?\n/);
 
@@ -198,7 +202,16 @@ export function extrairNomesDeListaCrua(textoCru) {
   return nomes;
 }
 
-export function parseListaClientes(textoCru) {
+// Núcleo compartilhado entre `parseListaClientes` e
+// `extrairNomesEContratosDeListaCrua`: agrupa a lista crua nos MESMOS blocos
+// (nome + contrato + CPF + telefone(s) + Fatura + valor + prazo), com a
+// mesma lógica de tokens/lookahead de sempre. `blocos` sai com TODOS os
+// blocos fechados, mesmo os sem telefone -- quem só quer nome+contrato (pra
+// achar um cliente já cadastrado, não criar um novo) não depende de telefone
+// nenhum; `itens`/`avisos` preservam exatamente o comportamento antigo de
+// `parseListaClientes` (1 item por telefone, aviso pra bloco sem telefone).
+function processarListaCrua(textoCru) {
+  const blocos = [];
   const itens = []; // { nome, numero, valor, arquivo, tipo_fatura, data_prazo, numero_contrato, data_contrato }
   const avisos = [];
 
@@ -211,6 +224,7 @@ export function parseListaClientes(textoCru) {
 
   function finalizarBloco() {
     if (!atual) return;
+    blocos.push(atual);
     if (atual.telefones.length === 0) {
       avisos.push(`"${atual.nome}" ignorado: nenhum telefone encontrado.`);
     } else {
@@ -352,5 +366,22 @@ export function parseListaClientes(textoCru) {
   // foi cortado).
   finalizarBloco();
 
+  return { blocos, itens, avisos };
+}
+
+export function parseListaClientes(textoCru) {
+  const { itens, avisos } = processarListaCrua(textoCru);
   return { itens, avisos };
+}
+
+// [2026-09] Extrai pares { nome, numero_contrato } da lista crua, 1 por
+// bloco -- usado por fluxos que precisam CASAR um nome colado com um cliente
+// JÁ cadastrado (ex.: POST /clientes/importar-pagos) e querem o contrato
+// disponível pra desambiguar duas pessoas de mesmo nome (ver
+// lib/nomeMatch.js, `casarCliente`). Ao contrário de `parseListaClientes`,
+// não exige telefone nenhum no bloco (esse fluxo não cria cliente, só
+// precisa achar um já existente).
+export function extrairNomesEContratosDeListaCrua(textoCru) {
+  const { blocos } = processarListaCrua(textoCru);
+  return blocos.map((b) => ({ nome: b.nome, numero_contrato: b.numero_contrato }));
 }

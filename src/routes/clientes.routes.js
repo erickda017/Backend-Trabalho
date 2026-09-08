@@ -4,10 +4,10 @@ import { supabase, BUCKET, urlProxyArquivo, urlsProxyArquivo } from '../lib/supa
 import { normalizarTelefone } from '../lib/telefone.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
-import { parseListaClientes, extrairNomesDeListaCrua } from '../lib/parseListaClientes.js';
+import { parseListaClientes, extrairNomesEContratosDeListaCrua } from '../lib/parseListaClientes.js';
 import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
 import { propagarDadosFatura, vincularNumero, desvincularNumero, membrosDoGrupo } from '../lib/faturaPropagacao.js';
-import { casarClientePorNome, normalizarTexto } from '../lib/nomeMatch.js';
+import { casarCliente, normalizarTexto } from '../lib/nomeMatch.js';
 import { cancelarItensPendentesDosClientes } from '../lib/tagsEfeito.js';
 import { sugerirPromocoesSpd, proximaDataMesmoDia } from '../lib/promocaoSpd.js';
 import { associarPendentesAoCliente } from '../lib/faturasPendentes.js';
@@ -190,14 +190,27 @@ router.post('/importar-pagos', async (req, res) => {
   // Mesmo reconhecimento de nome usado em "converter lista crua de clientes"
   // (ver parseListaClientes.js) -- aceita tanto colar só nomes (1 por linha)
   // quanto colar o mesmo bloco cru NOME/contrato/CPF/telefone(s)/Fatura/valor
-  // do relatório de cobrança, ignorando o resto e ficando só com os nomes.
-  const nomes = [...new Set(extrairNomesDeListaCrua(texto))];
-  if (!nomes.length) return res.status(400).json({ error: 'Nenhum nome encontrado no texto colado' });
-  if (nomes.length > 2000) return res.status(400).json({ error: 'Máximo de 2000 nomes por importação' });
+  // do relatório de cobrança. [2026-09] Diferente de antes, o CONTRATO
+  // (quando vem junto no texto colado) não é mais descartado -- é a forma
+  // PRINCIPAL de achar o cliente certo (ver lib/nomeMatch.js, `casarCliente`)
+  // -- evita marcar como pago o cliente ERRADO quando duas pessoas
+  // cadastradas têm o mesmo nome.
+  const paresColados = extrairNomesEContratosDeListaCrua(texto);
+  // Dedup por nome+contrato (mesmo par pode repetir no texto colado sem
+  // motivo real pra reprocessar 2x).
+  const vistosDedup = new Set();
+  const pares = paresColados.filter((p) => {
+    const chave = `${p.nome} ${p.numero_contrato ?? ''}`;
+    if (vistosDedup.has(chave)) return false;
+    vistosDedup.add(chave);
+    return true;
+  });
+  if (!pares.length) return res.status(400).json({ error: 'Nenhum nome encontrado no texto colado' });
+  if (pares.length > 2000) return res.status(400).json({ error: 'Máximo de 2000 nomes por importação' });
 
   const { data: clientes, error: clientesError } = await supabase
     .from('clientes')
-    .select('id, nome')
+    .select('id, nome, numero_contrato')
     .eq('usuario_id', usuarioId);
   if (clientesError) return res.status(500).json({ error: clientesError.message });
 
@@ -226,16 +239,28 @@ router.post('/importar-pagos', async (req, res) => {
 
   const encontrados = [];
   const naoEncontrados = [];
+  // [2026-09] Nome colado bate com 2+ clientes cadastrados e não havia
+  // contrato no texto pra desempatar -- não adivinha (marcar o errado como
+  // pago é pior que deixar de fora pra revisão manual). Separado de
+  // `naoEncontrados` pra UI poder orientar o operador a colar com o
+  // contrato, em vez de só "nome não encontrado" (que sugeriria cadastrar de
+  // novo, quando na real o cliente já existe, só que em duplicata de nome).
+  const ambiguos = [];
   const jaMarcadosVistos = new Set();
 
-  for (const nomeColado of nomes) {
-    const clienteCasado = casarClientePorNome(nomeColado, clientes || []);
+  for (const par of pares) {
+    const resultado = casarCliente({ nome: par.nome, numeroContrato: par.numero_contrato, clientes: clientes || [] });
+    if (resultado.status === 'ambiguo') {
+      ambiguos.push({ nome_colado: par.nome, candidatos: resultado.candidatos.length });
+      continue;
+    }
+    const clienteCasado = resultado.cliente;
     if (!clienteCasado || jaMarcadosVistos.has(clienteCasado.id)) {
-      if (!clienteCasado) naoEncontrados.push(nomeColado);
+      if (!clienteCasado) naoEncontrados.push(par.nome);
       continue;
     }
     jaMarcadosVistos.add(clienteCasado.id);
-    encontrados.push({ nome_colado: nomeColado, cliente_id: clienteCasado.id, cliente_nome: clienteCasado.nome });
+    encontrados.push({ nome_colado: par.nome, cliente_id: clienteCasado.id, cliente_nome: clienteCasado.nome });
   }
 
   if (encontrados.length) {
@@ -255,9 +280,10 @@ router.post('/importar-pagos', async (req, res) => {
 
   res.json({
     tag,
-    total_colados: nomes.length,
+    total_colados: pares.length,
     encontrados,
     nao_encontrados: naoEncontrados,
+    ambiguos,
     sugestoes_spd: sugestoesSpd,
   });
 });

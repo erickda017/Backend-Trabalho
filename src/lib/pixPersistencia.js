@@ -21,14 +21,19 @@ export async function resolverClientePix({ clienteId, arquivo, usuarioId }) {
   if (arquivo) {
     const nomeBase = String(arquivo).replace(/\.pdf$/i, '').trim();
     if (nomeBase) {
+      // [2026-09] Antes usava .limit(1).maybeSingle() -- se 2 clientes de
+      // nome parecido batessem o ILIKE, pegava QUALQUER um dos dois (ordem
+      // arbitrária do Postgres), risco real de vincular o Pix/PDF do
+      // cliente errado (2 pessoas de mesmo nome/nome parecido, contratos
+      // diferentes). Agora busca TODOS os candidatos e só casa se houver
+      // exatamente 1 -- ambíguo fica sem casar automaticamente (cai no
+      // fluxo normal de "não achou cliente", ver persistirExtracaoPix).
       const { data } = await supabase
         .from('clientes')
         .select('id')
         .eq('usuario_id', usuarioId)
-        .ilike('nome', `%${escaparFiltroPostgrest(nomeBase)}%`)
-        .limit(1)
-        .maybeSingle();
-      if (data?.id) return data.id;
+        .ilike('nome', `%${escaparFiltroPostgrest(nomeBase)}%`);
+      if (data?.length === 1) return data[0].id;
     }
   }
   return null;

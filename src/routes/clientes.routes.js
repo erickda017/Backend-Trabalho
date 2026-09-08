@@ -13,6 +13,8 @@ import { sugerirPromocoesSpd, proximaDataMesmoDia } from '../lib/promocaoSpd.js'
 import { associarPendentesAoCliente } from '../lib/faturasPendentes.js';
 import { achatarTags } from '../lib/achatarTags.js';
 import { iniciarVerificacao, statusVerificacao } from '../services/verificacaoVencimentos.js';
+import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
+import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 
 const router = Router();
 const upload = multer({
@@ -25,6 +27,7 @@ const upload = multer({
     cb(null, true);
   },
 });
+const uploadPdfComTratamentoDeErro = comTratamentoDeErroUpload(upload.single('pdf'), { limiteMb: 20, logPrefixo: '[clientes]' });
 
 // [2026-08] SEGURANÇA: bucket "faturas" agora é privado. `pdf_url` nunca é lido
 // direto do banco (a coluna é deprecated, ver comment on column no schema) --
@@ -51,14 +54,6 @@ async function clientesComSignedUrls(clientes) {
   return clientes.map((c, i) => ({ ...c, pdf_url: urls[i] }));
 }
 
-// Nome de arquivo seguro pra usar como parte da chave do Storage: mantém só
-// caracteres inofensivos e nunca deixa passar "/", "\" ou "..", que
-// permitiriam ao originalname (controlado por quem faz o upload) escapar da
-// pasta `${id}/` pretendida e escrever em outro caminho do bucket.
-function nomeArquivoSeguro(nome) {
-  const base = String(nome || 'arquivo.pdf').split(/[\\/]/).pop() || 'arquivo.pdf';
-  return base.replace(/\.\./g, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'arquivo.pdf';
-}
 
 // ---------------------------------------------------------------------------
 // Conversor de lista crua -- recebe o texto colado (formato NOME/contrato/CPF/
@@ -491,7 +486,7 @@ router.post('/', async (req, res) => {
 // frontend/src/lib/pixWorkerClient.ts) -- os campos pixCode/valor/vencimento/
 // linhaDigitavel, se enviados no body junto do arquivo, já vêm prontos do
 // Worker; esta rota só guarda o PDF no Storage e persiste o que recebeu.
-router.post('/:id/pdf', upload.single('pdf'), async (req, res) => {
+router.post('/:id/pdf', uploadPdfComTratamentoDeErro, async (req, res) => {
   const { id } = req.params;
   if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
 

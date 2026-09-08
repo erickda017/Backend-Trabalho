@@ -4,6 +4,8 @@ import { supabase, BUCKET, urlProxyArquivo } from '../lib/supabase.js';
 import { casarClientePorArquivo } from '../lib/nomeMatch.js';
 import { propagarDadosFatura } from '../lib/faturaPropagacao.js';
 import { criarPendencia } from '../lib/faturasPendentes.js';
+import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
+import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 
 // ---------------------------------------------------------------------------
 // "Upload de faturas avulsas, sem depender de planilha" -- pra quando o
@@ -29,15 +31,12 @@ const upload = multer({
   },
 });
 
-function nomeArquivoSeguro(nome) {
-  const base = String(nome || 'arquivo.pdf').split(/[\\/]/).pop() || 'arquivo.pdf';
-  return base.replace(/\.\./g, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'arquivo.pdf';
-}
+const uploadPdfComTratamentoDeErro = comTratamentoDeErroUpload(upload.single('pdf'), { limiteMb: 20, logPrefixo: '[faturas-avulsas]' });
 
 // POST /api/faturas/avulsas -- 1 PDF por requisição (o front chama uma vez
 // por arquivo, igual ao restante dos fluxos de upload deste projeto).
 // Body (multipart): pdf (arquivo), pixCode?/valor?/vencimento?/linhaDigitavel?
-router.post('/avulsas', upload.single('pdf'), async (req, res) => {
+router.post('/avulsas', uploadPdfComTratamentoDeErro, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
   const usuarioId = req.user.id;
   const nomeOriginal = req.file.originalname;

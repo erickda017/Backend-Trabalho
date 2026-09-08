@@ -5,11 +5,18 @@ import { enviarMensagemTexto, enviarMensagemComAnexo, validarNumero } from '../s
 import { registrarMensagemSaida } from '../services/chatIngest.js';
 import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
 import { achatarTags } from '../lib/achatarTags.js';
+import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
+import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 30 * 1024 * 1024 }, // 30MB -- mesma ordem de grandeza do WhatsApp
+  // [2026-09] Sem fileFilter de tipo aqui de propósito -- diferente das
+  // outras rotas de upload (só PDF), um anexo de chat pode ser
+  // imagem/áudio/documento de verdade (mesma variedade que o WhatsApp
+  // aceita), então restringir mimetype quebraria o uso real da função.
 });
+const uploadAnexoComTratamentoDeErro = comTratamentoDeErroUpload(upload.single('anexo'), { limiteMb: 30, logPrefixo: '[chat]' });
 
 function tipoPorMimetype(mimetype) {
   if (!mimetype) return 'documento';
@@ -166,7 +173,7 @@ router.post('/conversas/:id/vincular-cliente', async (req, res) => {
 });
 
 // Envia uma resposta pro cliente (texto e/ou anexo) e grava no histórico do chat
-router.post('/conversas/:id/mensagens', upload.single('anexo'), async (req, res) => {
+router.post('/conversas/:id/mensagens', uploadAnexoComTratamentoDeErro, async (req, res) => {
   const { id } = req.params;
   const usuarioId = req.user.id;
   const mensagem = (req.body?.mensagem || '').trim();
@@ -204,7 +211,10 @@ router.post('/conversas/:id/mensagens', upload.single('anexo'), async (req, res)
       // dois operadores com um cliente de mesmo telefone escreveriam no MESMO
       // object key do bucket chat-midia (upsert:true sobrescreve em silêncio),
       // vazando/substituindo anexo de um na conversa do outro.
-      const caminho = `${usuarioId}/${conversa.telefone}/${Date.now()}-${req.file.originalname}`;
+      // [2026-09] originalname sanitizado antes de virar object key -- antes
+      // ia cru, diferente das outras rotas de upload do sistema (risco real
+      // de path traversal via nome de arquivo controlado por quem envia).
+      const caminho = `${usuarioId}/${conversa.telefone}/${Date.now()}-${nomeArquivoSeguro(req.file.originalname, 'anexo')}`;
 
       const { error: uploadError } = await supabase.storage
         .from(CHAT_BUCKET)

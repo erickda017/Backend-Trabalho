@@ -63,8 +63,26 @@ function normalizarSegmento(s) {
   return out;
 }
 
+function ehLinhaVazia(l) {
+  return l === '';
+}
+
+// Separador EXPLÍCITO de bloco (### ou variantes) -- só isso fecha o bloco
+// atual. Linha em branco pura NÃO fecha mais (ver ehLinhaVazia acima e seu
+// uso em parseListaClientes): listas coladas direto de PDF costumam ter uma
+// linha em branco entre CADA campo (nome / contrato / CPF / telefone), não
+// só entre clientes diferentes -- tratar toda linha em branco como fim de
+// bloco descartava o cliente inteiro (nome fechado sem telefone, e os
+// campos seguintes viravam "trecho não reconhecido" por não ter bloco
+// aberto). Como um NOME novo já fecha o bloco anterior sozinho (ver comentário
+// "Um NOME sempre abre um bloco novo"), não é necessário depender da linha
+// em branco pra separar clientes no caso comum.
+function ehSeparadorExplicito(l) {
+  return /^#+$/.test(l);
+}
+
 function ehSeparador(l) {
-  return l === '' || /^#+$/.test(l);
+  return ehLinhaVazia(l) || ehSeparadorExplicito(l);
 }
 
 function ehLinhaDigitos(l) {
@@ -227,10 +245,12 @@ export function parseListaClientes(textoCru) {
   const linhas = String(textoCru || '').split(/\r?\n/);
 
   for (const linhaBruta of linhas) {
-    if (ehSeparador(linhaBruta.trim())) {
+    const linha = linhaBruta.trim();
+    if (ehSeparadorExplicito(linha)) {
       finalizarBloco();
       continue;
     }
+    if (ehLinhaVazia(linha)) continue;
 
     const segmentos = dividirEmSegmentos(linhaBruta).map(normalizarSegmento).filter(Boolean);
 

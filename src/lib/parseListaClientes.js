@@ -244,61 +244,108 @@ export function parseListaClientes(textoCru) {
 
   const linhas = String(textoCru || '').split(/\r?\n/);
 
+  // Acha o texto inteiro numa lista de tokens (marcando linha em branco e
+  // separador explícito, além dos segmentos de verdade), pra dar pra olhar o
+  // PRÓXIMO campo real antes de decidir se um trecho com letra é de fato um
+  // nome de cliente novo -- ver por quê logo abaixo, no uso de
+  // `proximoSegmentoReal`.
+  const tokens = [];
   for (const linhaBruta of linhas) {
     const linha = linhaBruta.trim();
     if (ehSeparadorExplicito(linha)) {
+      tokens.push({ tipo: 'separador' });
+      continue;
+    }
+    if (ehLinhaVazia(linha)) {
+      tokens.push({ tipo: 'vazio' });
+      continue;
+    }
+    for (const segmentoBruto of dividirEmSegmentos(linhaBruta)) {
+      const segmento = normalizarSegmento(segmentoBruto);
+      if (segmento) tokens.push({ tipo: 'segmento', valor: segmento });
+    }
+  }
+
+  // Próximo segmento de verdade depois do índice i, pulando linha(s) em
+  // branco -- pára (devolve null) se achar um separador explícito ou o fim
+  // do texto antes de achar um.
+  function proximoSegmentoReal(i) {
+    for (let j = i + 1; j < tokens.length; j++) {
+      const t = tokens[j];
+      if (t.tipo === 'vazio') continue;
+      if (t.tipo === 'segmento') return t.valor;
+      return null;
+    }
+    return null;
+  }
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.tipo === 'separador') {
       finalizarBloco();
       continue;
     }
-    if (ehLinhaVazia(linha)) continue;
+    if (token.tipo === 'vazio') continue;
 
-    const segmentos = dividirEmSegmentos(linhaBruta).map(normalizarSegmento).filter(Boolean);
+    const l = token.valor;
 
-    for (const l of segmentos) {
-      // CPF nunca é guardado (às vezes vem CNPJ mesmo rotulado "CPF") --
-      // ignora independente de ter ou não um bloco aberto.
-      if (ehLinhaCpf(l)) continue;
+    // CPF nunca é guardado (às vezes vem CNPJ mesmo rotulado "CPF") --
+    // ignora independente de ter ou não um bloco aberto.
+    if (ehLinhaCpf(l)) continue;
 
-      if (ehLinhaNome(l)) {
-        // Um NOME sempre abre um bloco novo -- fecha o anterior (mesmo que
-        // incompleto), não importa quantos campos ele já tinha coletado.
-        finalizarBloco();
-        atual = novoBloco(l);
-        continue;
-      }
-
-      if (!atual) {
-        // Campo reconhecido (valor/data/fatura/dígitos) sem nenhum nome
-        // aberto antes -- não tem a quem atribuir.
+    if (ehLinhaNome(l)) {
+      // Um texto com letra logo seguido (pulando linha em branco) por
+      // Fatura/valor/prazo -- sem contrato/CPF/telefone no meio -- não é um
+      // cliente novo, é ruído tipo nome de plano/operadora colado entre os
+      // telefones e a linha "Fatura N" (ex.: "CLARO MEGA"). Um cliente de
+      // verdade NUNCA aparece assim: sempre tem contrato/CPF/telefone antes
+      // de Fatura/valor/prazo (ver formato documentado no topo do arquivo).
+      const proximo = proximoSegmentoReal(i);
+      const proximoEhCampoDeFatura = proximo !== null && (ehLinhaFatura(proximo) || ehLinhaValor(proximo) || ehLinhaComData(proximo));
+      if (proximoEhCampoDeFatura) {
         avisarTrechoIgnorado(l);
         continue;
       }
 
-      if (ehLinhaFatura(l)) {
-        atual.tipo_fatura = tipoFaturaDeLinha(l);
-        continue;
-      }
-      if (ehLinhaComData(l)) {
-        atual.dataPrazo = parseDataBr(l);
-        continue;
-      }
-      if (ehLinhaValor(l)) {
-        atual.valor = parseValor(l);
-        continue;
-      }
-      if (ehLinhaDigitos(l)) {
-        const digitos = l.replace(/\D/g, '');
-        if (pareceContrato(digitos) && !atual.numero_contrato && !pareceTelefone(digitos)) {
-          atual.numero_contrato = digitos;
-        } else {
-          // Também cobre o fallback de um tamanho fora do esperado (melhor
-          // tentar como telefone do que perder o número).
-          atual.telefones.push(digitos);
-        }
-        continue;
-      }
-      avisarTrechoIgnorado(l);
+      // Um NOME de verdade sempre abre um bloco novo -- fecha o anterior
+      // (mesmo que incompleto), não importa quantos campos ele já tinha
+      // coletado.
+      finalizarBloco();
+      atual = novoBloco(l);
+      continue;
     }
+
+    if (!atual) {
+      // Campo reconhecido (valor/data/fatura/dígitos) sem nenhum nome
+      // aberto antes -- não tem a quem atribuir.
+      avisarTrechoIgnorado(l);
+      continue;
+    }
+
+    if (ehLinhaFatura(l)) {
+      atual.tipo_fatura = tipoFaturaDeLinha(l);
+      continue;
+    }
+    if (ehLinhaComData(l)) {
+      atual.dataPrazo = parseDataBr(l);
+      continue;
+    }
+    if (ehLinhaValor(l)) {
+      atual.valor = parseValor(l);
+      continue;
+    }
+    if (ehLinhaDigitos(l)) {
+      const digitos = l.replace(/\D/g, '');
+      if (pareceContrato(digitos) && !atual.numero_contrato && !pareceTelefone(digitos)) {
+        atual.numero_contrato = digitos;
+      } else {
+        // Também cobre o fallback de um tamanho fora do esperado (melhor
+        // tentar como telefone do que perder o número).
+        atual.telefones.push(digitos);
+      }
+      continue;
+    }
+    avisarTrechoIgnorado(l);
   }
 
   // Último bloco do texto (EOF sem separador final -- comum quando o texto

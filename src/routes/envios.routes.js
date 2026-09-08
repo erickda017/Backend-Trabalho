@@ -47,10 +47,22 @@ function montarEnvioResumo(envio, contadores) {
 //
 // Três filtros de elegibilidade, aplicados sempre (independente de ter vindo
 // por cliente_ids solto ou por tag_ids):
-//   1) precisa ter PDF vinculado (`pdf_path`) -- cliente novo sem fatura
-//      ainda não entra; assim que o PDF é linkado (manual, extrator de Pix
-//      ou importação -- os três caminhos gravam pdf_path), ele passa a
-//      entrar automaticamente no PRÓXIMO lote montado, sem nenhum passo manual.
+//   1) [modo 'pdf', o padrão] precisa ter PDF vinculado (`pdf_path`) --
+//      cliente novo sem fatura ainda não entra; assim que o PDF é linkado
+//      (manual, extrator de Pix ou importação -- os três caminhos gravam
+//      pdf_path), ele passa a entrar automaticamente no PRÓXIMO lote
+//      montado, sem nenhum passo manual.
+//      [modo 'pix'] exige `pix_code` em vez de `pdf_path` -- lote inteiro
+//      manda só o código Pix mesmo pro cliente sem PDF nenhum cadastrado,
+//      desde que tenha Pix.
+//      [2026-09] [modo 'livre'] não exige nem PDF nem Pix -- disparo manda
+//      só a mensagem de texto pra QUALQUER cliente elegível pelos outros
+//      dois filtros abaixo, mesmo sem fatura/PIX cadastrado ainda. Pedido
+//      explícito: às vezes o operador quer avisar/cobrar por texto antes
+//      mesmo de ter a fatura em mãos. Se o cliente selecionado tiver PDF
+//      mesmo assim, o disparo anexa normalmente (mesmo comportamento do
+//      modo 'pdf' por cliente -- ver dispatchQueue.js, só o modo 'pix' força
+//      texto puro pra todo mundo).
 //   2) não pode ter nenhuma tag com `permite_disparo = false` (ex.: Pago,
 //      Cancelado) -- ver migration-14-tags-controlam-disparo.sql.
 //   3) [2026-08] QUALIDADE: não pode estar com `status_operador` num valor
@@ -60,11 +72,7 @@ function montarEnvioResumo(envio, contadores) {
 //      pelo desfecho registrado numa tratativa em vez de uma tag manual.
 // Retorna também quantos ficaram de fora por cada motivo, pra UI poder
 // avisar em vez de só devolver uma lista menor sem explicação.
-// `exigirPix`: quando true (lote `enviar_pix`), a elegibilidade passa a
-// exigir `pix_code` em vez de `pdf_path` -- faz sentido pro lote inteiro
-// mandar só o código Pix mesmo pra cliente que não tem PDF nenhum cadastrado,
-// desde que tenha Pix.
-async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, exigirPix = false) {
+async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, modoElegibilidade = 'pdf') {
   const conjunto = new Set(clienteIds);
 
   if (Array.isArray(tagIds) && tagIds.length) {
@@ -88,7 +96,10 @@ async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, exigi
   if (donosError) throw donosError;
 
   const candidatos = donos || [];
-  const elegivel = (c) => (exigirPix ? Boolean(c.pix_code) : Boolean(c.pdf_path));
+  const elegivel = (c) => {
+    if (modoElegibilidade === 'livre') return true;
+    return modoElegibilidade === 'pix' ? Boolean(c.pix_code) : Boolean(c.pdf_path);
+  };
   const semPdf = candidatos.filter((c) => !elegivel(c)).length;
   const comPdf = candidatos.filter(elegivel);
   if (!comPdf.length) return { clienteIds: [], semPdf, bloqueadosPorTag: 0 };
@@ -169,12 +180,18 @@ router.post('/teste', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // Cria um novo envio (lote de disparo)
-// body: { mensagem, mensagens, cliente_ids[], tag_ids[], intervalo_ms, janela_ms, agendado_para? }
+// body: { mensagem, mensagens, cliente_ids[], tag_ids[], intervalo_ms, janela_ms, agendado_para?, enviar_pix?, livre? }
 // ---------------------------------------------------------------------------
 router.post('/', async (req, res) => {
   const usuarioId = req.user.id;
-  const { mensagem, mensagens, cliente_ids = [], tag_ids = [], intervalo_ms, janela_ms, agendado_para, enviar_pix } = req.body || {};
+  const { mensagem, mensagens, cliente_ids = [], tag_ids = [], intervalo_ms, janela_ms, agendado_para, enviar_pix, livre } = req.body || {};
   const enviarPix = enviar_pix === true;
+  // [2026-09] `livre`: disparo sem exigir PDF nem Pix cadastrado (ver
+  // comentário de `resolverClienteIds` acima). Não faz sentido junto com
+  // `enviar_pix` (que FORÇA exigir Pix) -- `enviar_pix` tem prioridade se os
+  // dois vierem true por engano.
+  const modoLivre = livre === true && !enviarPix;
+  const modoElegibilidade = modoLivre ? 'livre' : enviarPix ? 'pix' : 'pdf';
 
   // `mensagens`: array com até 5 variações do texto (ver migration-9). O
   // front manda sempre esse array quando o usuário preenche mais de uma
@@ -192,7 +209,7 @@ router.post('/', async (req, res) => {
 
   let resolucao;
   try {
-    resolucao = await resolverClienteIds(cliente_ids, tag_ids, usuarioId, enviarPix);
+    resolucao = await resolverClienteIds(cliente_ids, tag_ids, usuarioId, modoElegibilidade);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

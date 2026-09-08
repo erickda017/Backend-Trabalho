@@ -42,30 +42,37 @@ um erro explícito no início explicando o que fazer. Em desenvolvimento local
 (sem essas variáveis), o comportamento permissivo de antes continua, pra não
 travar quem está rodando na própria máquina.
 
-## Limitação conhecida, não corrigida nesta rodada: autorização por objeto
+## [2026-08, ATUALIZADO 2026-09] Autorização por objeto — já corrigida (multi-tenant)
 
-O sistema não tem colunas de "dono" (`user_id`, `empresa_id` etc.) em
-`clientes`, `envios`, `conversas` — foi construído como **single-tenant**:
-uma instância inteira (um número de WhatsApp, uma base de clientes) para uma
-única equipe. `requireAuth` garante que só usuários logados no Supabase Auth
-desse projeto acessam a API, mas **qualquer conta autenticada enxerga todos
-os dados** (não existe "cada vendedor só vê os próprios clientes", por
-exemplo).
+**Esta seção descrevia uma limitação real da rodada de 2026-08 (single-tenant)
+que já não existe.** Registro histórico abaixo, seguido do estado atual.
 
-Isso é aceitável **somente se** todo mundo que tem uma conta nesse projeto
-Supabase for de fato uma pessoa de confiança da mesma equipe/empresa, com
-permissão para ver a base de clientes inteira (CPF, endereço, fatura). Se
-esse não for o caso — por exemplo, se a ideia é várias empresas/times
-diferentes usando o mesmo backend, cada um só com seus próprios clientes —
-isso precisa de uma mudança estrutural (coluna `empresa_id` em `clientes` e
-nas tabelas relacionadas + filtro em toda query pelo `req.user`), que não foi
-feita porque muda o modelo de dados e o fluxo de cadastro de usuários, e não
-dava pra decidir isso sem confirmar o cenário de uso real com quem mantém o
-sistema.
+*Como era em 2026-08:* o sistema não tinha colunas de "dono" (`user_id` etc.)
+em `clientes`/`envios`/`conversas` — uma instância inteira (um número de
+WhatsApp, uma base de clientes) para uma única equipe. `requireAuth` garantia
+login, mas qualquer conta autenticada enxergava todos os dados.
 
-**Recomendação:** se houver qualquer chance de múltiplas equipes/clientes
-finais compartilharem esta mesma instância, tratar isso antes de ir para
-produção.
+*Estado atual:* `migration-13-multi-tenant.sql` (2026-08, pouco depois desta
+auditoria) adicionou `usuario_id` em todas as tabelas relevantes (`clientes`,
+`envios`, `envio_itens`, `conversas`, `mensagens`, `tags`, `pix_extracoes`,
+etc.) com policies de RLS reais, e toda rota do backend passou a filtrar por
+`req.user.id` — cada operador só vê/mexe nos próprios dados, confirmado rota
+a rota (ver auditoria técnica de 2026-09 em `Front-Trabalho/CONTEXTO.md`).
+
+**Achado crítico dessa auditoria de 2026-09, já corrigido:** o proxy de
+arquivos (`routes/arquivos.routes.js`) era a ÚNICA rota que não repetia esse
+cuidado — servia qualquer path pedido sem confirmar o dono, então um operador
+que soubesse (ou adivinhasse) o path de um arquivo de outro operador
+conseguia baixá-lo. Corrigido: a rota agora resolve o dono do path (por
+convenção de bucket, com fallback pra consulta no banco) antes de servir, com
+exceção só pra `role=supervisor` (que já enxerga arquivo de todo operador em
+outras rotas, ex.: `GET /supervisor/clientes`).
+
+**Ressalva que continua válida independente de tudo isso:** o backend usa a
+`service_role key`, que sempre ignora RLS — um vazamento dessa chave expõe o
+banco inteiro de todos os operadores, RLS ou não. As policies de
+`migration-13` protegem contra outro cenário (JWT de usuário comum vazado, ou
+bug de rota que esqueça o filtro `usuario_id`), não contra isso.
 
 ## Pendência intencional: OCR via Cloudflare Worker de terceiro
 

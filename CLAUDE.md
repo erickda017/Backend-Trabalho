@@ -52,7 +52,13 @@ achando que é bug de código quando na verdade é falta de configuração.
 - **Backend → Render**, Web Service configurado manualmente pelo painel
   (não usa Blueprint/`render.yaml` — se existir um `render.yaml` no repo,
   ele é só referência/histórico, **não é a fonte de verdade do deploy real**).
-  Precisa de Persistent Disk pra sessão do WhatsApp sobreviver a redeploys.
+  A sessão do WhatsApp (Baileys) é persistida na tabela `whatsapp_sessions`
+  do Supabase (`src/lib/supabaseAuthState.js`), não em disco — **não precisa
+  de Persistent Disk** pra sobreviver a redeploys (isso já foi verdade no
+  passado, mudou; se algum guia mais antigo ou o painel do Render ainda
+  tiver um disco configurado por causa disso, pode remover). O que se perde
+  quando o processo dorme/reinicia é só a conexão WebSocket em aberto —
+  reconecta sozinho na próxima requisição, sem precisar de QR novo.
   Free tier "dorme" após inatividade — primeira requisição depois de dormir
   pode demorar ou parecer `Failed to fetch` no frontend.
 - **Frontend → Vercel.** Variável de ambiente obrigatória:
@@ -77,8 +83,17 @@ achando que é bug de código quando na verdade é falta de configuração.
   coluna é `date` puro — o planner não isola o overload IMMUTABLE do
   overload STABLE de `to_char`. Alternativa que funciona: montar o texto
   com `extract(year/month from coluna)` + `lpad(...)` em vez de `to_char`.
-- RLS está habilitado nas tabelas mas **sem policies** — isso é intencional
-  (o backend usa a `service_role key`, que ignora RLS). Não é bug.
+- RLS: a `migration-13-multi-tenant.sql` já adicionou policies reais de
+  isolamento por `usuario_id` nas tabelas principais (`clientes`, `envios`,
+  `envio_itens`, `conversas`, `mensagens`, `tags`, `cliente_tags`,
+  `respostas_rapidas`, `pix_extracoes`, e depois `faturas_pendentes`/
+  `safras_historico`). Só `whatsapp_sessions`, `auditoria_exclusoes`,
+  `perfis` e `tratativas` continuam com RLS habilitado **sem** policy —
+  isso sim é intencional (o backend usa a `service_role key`, que ignora
+  RLS de qualquer forma). Vale lembrar: mesmo com as policies nas tabelas
+  principais, um vazamento da `service_role key` ainda expõe tudo, já que
+  ela sempre ignora RLS — as policies protegem contra outro cenário (JWT de
+  usuário comum vazado, ou bug de rota que esqueça o filtro `usuario_id`).
 
 ## Rotas principais do backend (`Backend-Trabalho/src/routes/`)
 

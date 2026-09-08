@@ -15,6 +15,7 @@ import { achatarTags } from '../lib/achatarTags.js';
 import { iniciarVerificacao, statusVerificacao } from '../services/verificacaoVencimentos.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
+import { limiteSensivel } from '../lib/rateLimit.js';
 
 const router = Router();
 const upload = multer({
@@ -60,7 +61,7 @@ async function clientesComSignedUrls(clientes) {
 // telefone(s)/Fatura/valor) e devolve as linhas já no layout da planilha modelo
 // (1 linha por telefone). Só faz o parse -- não grava nada no banco ainda,
 // pra dar chance de revisar antes de importar (ver POST /importar-lista).
-router.post('/converter-lista', (req, res) => {
+router.post('/converter-lista', limiteSensivel, (req, res) => {
   const { texto } = req.body || {};
   if (!texto || typeof texto !== 'string' || !texto.trim()) {
     return res.status(400).json({ error: 'Cole o texto da lista de clientes no campo "texto"' });
@@ -89,7 +90,7 @@ router.post('/converter-lista', (req, res) => {
 // desta feature (ficava mostrando/mandando na mensagem uma data ~30 dias
 // divergente da real). `vencimento` só é preenchido pela verificação real
 // do PDF (ver services/verificacaoVencimentos.js) ou por cadastro manual.
-router.post('/importar-lista', async (req, res) => {
+router.post('/importar-lista', limiteSensivel, async (req, res) => {
   const { itens } = req.body || {};
   if (!Array.isArray(itens) || itens.length === 0) {
     return res.status(400).json({ error: 'Campo "itens" (array) é obrigatório' });
@@ -175,7 +176,7 @@ router.post('/importar-lista', async (req, res) => {
 // Aceita 1 nome por linha (cole direto de uma planilha, uma coluna só).
 // Devolve quem foi encontrado (e marcado) e quem não bateu com ninguém, pra
 // o operador revisar/corrigir manualmente os que sobraram.
-router.post('/importar-pagos', async (req, res) => {
+router.post('/importar-pagos', limiteSensivel, async (req, res) => {
   const { texto } = req.body || {};
   if (!texto || typeof texto !== 'string' || !texto.trim()) {
     return res.status(400).json({ error: 'Cole a lista de nomes no campo "texto" (1 nome por linha)' });
@@ -486,7 +487,7 @@ router.post('/', async (req, res) => {
 // frontend/src/lib/pixWorkerClient.ts) -- os campos pixCode/valor/vencimento/
 // linhaDigitavel, se enviados no body junto do arquivo, já vêm prontos do
 // Worker; esta rota só guarda o PDF no Storage e persiste o que recebeu.
-router.post('/:id/pdf', uploadPdfComTratamentoDeErro, async (req, res) => {
+router.post('/:id/pdf', limiteSensivel, uploadPdfComTratamentoDeErro, async (req, res) => {
   const { id } = req.params;
   if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
 
@@ -712,6 +713,17 @@ router.delete('/:id', async (req, res) => {
 
   if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado' });
 
+  // [2026-09] `envio_itens`/`tratativas` são `on delete cascade` a partir de
+  // `clientes` (ver supabase-schema.sql / migration-20) -- apagar o cliente
+  // some com todo o histórico de disparo e de tratativa de cobrança JUNTO,
+  // sem deixar rastro nenhum. Conta ANTES de apagar (depois não tem mais
+  // como) só pra registrar quantos itens se perderam na mesma linha de
+  // auditoria -- não impede a exclusão, só documenta o que ela levou junto.
+  const [{ count: enviosApagados }, { count: tratativasApagadas }] = await Promise.all([
+    supabase.from('envio_itens').select('id', { count: 'exact', head: true }).eq('cliente_id', id),
+    supabase.from('tratativas').select('id', { count: 'exact', head: true }).eq('cliente_id', id),
+  ]);
+
   const { error } = await supabase.from('clientes').delete().eq('id', id).eq('usuario_id', req.user.id);
   if (error) return res.status(500).json({ error: error.message });
 
@@ -719,7 +731,13 @@ router.delete('/:id', async (req, res) => {
     entidade: 'cliente',
     entidadeId: id,
     usuario: req.user,
-    detalhes: { nome: cliente.nome, telefone: cliente.telefone, pdf_path: cliente.pdf_path || null },
+    detalhes: {
+      nome: cliente.nome,
+      telefone: cliente.telefone,
+      pdf_path: cliente.pdf_path || null,
+      envio_itens_apagados_em_cascata: enviosApagados ?? 0,
+      tratativas_apagadas_em_cascata: tratativasApagadas ?? 0,
+    },
   });
 
   if (cliente.pdf_path) {

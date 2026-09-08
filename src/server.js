@@ -8,6 +8,7 @@ import { recuperarEnviosTravados } from './services/dispatchQueue.js';
 import { iniciarLimpezaAutomatica } from './services/limpezaAutomatica.js';
 import { requireAuth } from './middleware/auth.js';
 import { requireSupervisor } from './middleware/supervisor.js';
+import { limiteGeral } from './lib/rateLimit.js';
 import whatsappRoutes from './routes/whatsapp.routes.js';
 import clientesRoutes from './routes/clientes.routes.js';
 import enviosRoutes from './routes/envios.routes.js';
@@ -89,6 +90,14 @@ app.use(cors({ origin: origensPermitidas }));
 app.use(express.json({ limit: '5mb' }));
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+// [2026-09] Rate limiting básico em toda /api/* -- ver lib/rateLimit.js.
+// Registrado DEPOIS de GET /api/health (linha acima) de propósito: aquele
+// handler já responde e encerra a requisição, então health check (batido
+// por monitoramento externo com frequência) nunca chega a passar por este
+// middleware. Rotas de maior impacto (disparo, importação, upload) ganham
+// um limite mais apertado por cima deste, aplicado localmente em cada rota.
+app.use('/api', limiteGeral);
 
 // todas as rotas abaixo exigem login (Supabase Auth)
 app.use('/api/whatsapp', requireAuth, whatsappRoutes);

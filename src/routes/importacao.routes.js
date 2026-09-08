@@ -4,6 +4,7 @@ import XLSX from 'xlsx';
 import { processarImportacaoLotePronto } from '../services/importLote.js';
 import { normalizarTelefone } from '../lib/telefone.js';
 import { supabase, BUCKET, urlProxyArquivo } from '../lib/supabase.js';
+import { limiteSensivel } from '../lib/rateLimit.js';
 
 const router = Router();
 
@@ -58,7 +59,7 @@ function caminhoSeguro(caminho) {
   return normalizado;
 }
 
-router.post('/upload-pdf', uploadPdfComTratamentoDeErro, async (req, res) => {
+router.post('/upload-pdf', limiteSensivel, uploadPdfComTratamentoDeErro, async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
     const caminhoRelativo = caminhoSeguro(req.body?.caminho);
@@ -143,7 +144,7 @@ function validarItemLote(item) {
 // já hospedado/código Pix já extraído -- nunca vê um PDF, nunca faz OCR. Por
 // isso pode processar uma importação de 100+ clientes sem chegar perto de
 // estourar RAM, mesmo num plano de hospedagem pequeno (Render free, 512MB).
-router.post('/lote', async (req, res) => {
+router.post('/lote', limiteSensivel, async (req, res) => {
   try {
     const { itens, mensagem, lote } = req.body || {};
 

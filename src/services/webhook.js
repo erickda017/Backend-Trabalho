@@ -1,3 +1,5 @@
+import { createHmac } from 'node:crypto';
+
 // Dispara um webhook HTTP (se configurado) para eventos do sistema:
 // disparo iniciado/concluído, mensagem enviada, erro, status de entrega/leitura, etc.
 // Configurável via WEBHOOK_URL no .env. Se não estiver setado, não faz nada.
@@ -28,18 +30,30 @@ export async function dispararWebhook(evento, dados) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10_000);
 
+    const corpo = JSON.stringify({
+      evento,
+      dados,
+      timestamp: new Date().toISOString(),
+    });
+
+    // [2026-09] Antes só mandava o segredo cru no header (X-Webhook-Secret) --
+    // quem recebe não tinha como confirmar que o corpo não foi adulterado no
+    // caminho, só que quem chamou "sabia" o segredo. Assinatura HMAC-SHA256
+    // do corpo (padrão usado por Stripe/GitHub/etc.) deixa isso verificável:
+    // quem recebe recalcula o HMAC com o mesmo segredo e compara com o header
+    // -- X-Webhook-Secret continua indo também, por compatibilidade com quem
+    // já integrou só checando ele.
+    const assinatura = WEBHOOK_SECRET ? createHmac('sha256', WEBHOOK_SECRET).update(corpo).digest('hex') : null;
+
     try {
       await fetch(WEBHOOK_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(WEBHOOK_SECRET ? { 'X-Webhook-Secret': WEBHOOK_SECRET } : {}),
+          ...(assinatura ? { 'X-Webhook-Signature': `sha256=${assinatura}` } : {}),
         },
-        body: JSON.stringify({
-          evento,
-          dados,
-          timestamp: new Date().toISOString(),
-        }),
+        body: corpo,
         signal: controller.signal,
       });
     } finally {

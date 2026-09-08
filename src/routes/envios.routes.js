@@ -20,6 +20,7 @@ import { normalizarTelefone } from '../lib/telefone.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
 import { STATUS_BLOQUEIA_DISPARO } from '../lib/statusOperador.js';
 import { agregarContadores } from '../lib/agregarContadores.js';
+import { limiteSensivel } from '../lib/rateLimit.js';
 
 const router = Router();
 
@@ -125,7 +126,7 @@ async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, modoE
 // DISPARO DE TESTE -- manda UMA mensagem real, isolado do fluxo de lote.
 // body: { telefone, mensagem, cliente_id }
 // ---------------------------------------------------------------------------
-router.post('/teste', async (req, res) => {
+router.post('/teste', limiteSensivel, async (req, res) => {
   const { telefone, mensagem, cliente_id, com_pdf } = req.body || {};
   const usuarioId = req.user.id;
   // Compat: front manda `com_pdf` (checkbox "Enviar PDF da fatura"). Ausente
@@ -182,7 +183,7 @@ router.post('/teste', async (req, res) => {
 // Cria um novo envio (lote de disparo)
 // body: { mensagem, mensagens, cliente_ids[], tag_ids[], intervalo_ms, janela_ms, agendado_para?, enviar_pix?, livre? }
 // ---------------------------------------------------------------------------
-router.post('/', async (req, res) => {
+router.post('/', limiteSensivel, async (req, res) => {
   const usuarioId = req.user.id;
   const { mensagem, mensagens, cliente_ids = [], tag_ids = [], intervalo_ms, janela_ms, agendado_para, enviar_pix, livre } = req.body || {};
   const enviarPix = enviar_pix === true;
@@ -259,7 +260,7 @@ router.post('/', async (req, res) => {
 });
 
 // Dispara o envio imediatamente (assíncrono, roda em background)
-router.post('/:id/disparar', async (req, res) => {
+router.post('/:id/disparar', limiteSensivel, async (req, res) => {
   const usuarioId = req.user.id;
   if (disparoEmAndamento(usuarioId)) {
     return res.status(409).json({ error: 'já existe um disparo seu em andamento' });
@@ -277,7 +278,7 @@ router.post('/:id/disparar', async (req, res) => {
 });
 
 // Reenvia apenas os itens que falharam (status 'erro') nesse envio
-router.post('/:id/reenviar-erros', async (req, res) => {
+router.post('/:id/reenviar-erros', limiteSensivel, async (req, res) => {
   const usuarioId = req.user.id;
   if (disparoEmAndamento(usuarioId)) {
     return res.status(409).json({ error: 'já existe um disparo seu em andamento' });

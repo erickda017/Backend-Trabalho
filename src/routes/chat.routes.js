@@ -7,6 +7,7 @@ import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
 import { achatarTags } from '../lib/achatarTags.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
+import { limiteSensivel } from '../lib/rateLimit.js';
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -173,7 +174,7 @@ router.post('/conversas/:id/vincular-cliente', async (req, res) => {
 });
 
 // Envia uma resposta pro cliente (texto e/ou anexo) e grava no histórico do chat
-router.post('/conversas/:id/mensagens', uploadAnexoComTratamentoDeErro, async (req, res) => {
+router.post('/conversas/:id/mensagens', limiteSensivel, uploadAnexoComTratamentoDeErro, async (req, res) => {
   const { id } = req.params;
   const usuarioId = req.user.id;
   const mensagem = (req.body?.mensagem || '').trim();

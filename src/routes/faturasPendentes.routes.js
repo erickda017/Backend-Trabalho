@@ -6,6 +6,7 @@ import { propagarDadosFatura } from '../lib/faturaPropagacao.js';
 import { criarPendencia } from '../lib/faturasPendentes.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
+import { limiteSensivel } from '../lib/rateLimit.js';
 
 // ---------------------------------------------------------------------------
 // "Upload de faturas avulsas, sem depender de planilha" -- pra quando o
@@ -36,7 +37,7 @@ const uploadPdfComTratamentoDeErro = comTratamentoDeErroUpload(upload.single('pd
 // POST /api/faturas/avulsas -- 1 PDF por requisição (o front chama uma vez
 // por arquivo, igual ao restante dos fluxos de upload deste projeto).
 // Body (multipart): pdf (arquivo), pixCode?/valor?/vencimento?/linhaDigitavel?
-router.post('/avulsas', uploadPdfComTratamentoDeErro, async (req, res) => {
+router.post('/avulsas', limiteSensivel, uploadPdfComTratamentoDeErro, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
   const usuarioId = req.user.id;
   const nomeOriginal = req.file.originalname;

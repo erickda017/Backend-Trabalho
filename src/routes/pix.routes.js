@@ -8,6 +8,7 @@ import { responderExportacao } from '../lib/exportar.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
 import { persistirExtracaoPix } from '../lib/pixPersistencia.js';
 import { extrairPixDeArquivoNoServidor } from '../services/extratorServidorPix.js';
+import { limiteSensivel } from '../lib/rateLimit.js';
 
 // [2026-08] Esta rota NÃO recebe mais PDF nenhum pro fluxo PADRÃO. O upload +
 // extração de Pix (fatiar o PDF com pdf-lib, mandar cada página pro
@@ -54,7 +55,7 @@ function uploadServidorComTratamentoDeErro(req, res, next) {
   });
 }
 
-router.post('/extrair-servidor', uploadServidorComTratamentoDeErro, async (req, res) => {
+router.post('/extrair-servidor', limiteSensivel, uploadServidorComTratamentoDeErro, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
   const usuarioId = req.user.id;
   const nomeOriginal = req.body?.arquivo || req.file.originalname || 'boleto.pdf';

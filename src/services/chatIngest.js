@@ -100,9 +100,16 @@ async function baixarEGuardarMidia(sock, waMessage, { mediaMsg, mimetype, fileNa
 //  3) cache interno do próprio Baileys (signalRepository.lidMapping) -- pode já
 //     ter a resposta mesmo sem vir na mensagem. Função opcional dependendo da
 //     versão instalada, por isso tudo com optional chaining.
+//  4) nossa própria coluna `conversas.lid` (ver migration-24) -- se ESSE MESMO
+//     lid já foi resolvido com sucesso antes (por qualquer uma das 3 formas
+//     acima, em mensagem anterior), a conversa já guarda o telefone real.
+//     Cobre o caso relatado: responder pelo WhatsApp OFICIAL no celular (fora
+//     da plataforma) chega como sincronização multi-device sem
+//     remoteJidAlt/senderPn e sem cache do Baileys -- sem esse fallback, cada
+//     resposta assim criava um contato-fantasma novo "não identificado".
 // Se nada resolver, devolve null -- quem chamou decide o que fazer (a gente NUNCA
 // inventa um telefone a partir do próprio lid, ver processarMensagem).
-async function resolverTelefonePorLid(sock, key) {
+async function resolverTelefonePorLid(sock, key, usuarioId) {
   if (key.remoteJidAlt) return key.remoteJidAlt.split('@')[0];
   if (key.senderPn) return key.senderPn.split('@')[0];
   try {
@@ -110,6 +117,15 @@ async function resolverTelefonePorLid(sock, key) {
     if (pn) return String(pn).split('@')[0];
   } catch {
     // mapeamento indisponível nessa versão/momento -- segue sem resolver
+  }
+  if (usuarioId) {
+    const { data } = await supabase
+      .from('conversas')
+      .select('telefone')
+      .eq('lid', key.remoteJid)
+      .eq('usuario_id', usuarioId)
+      .maybeSingle();
+    if (data?.telefone) return data.telefone;
   }
   return null;
 }
@@ -149,64 +165,71 @@ async function fundirFantasmaLidSeExistir(telefonePseudo, telefoneReal, usuarioI
   }
 }
 
-// Acha a conversa pelo telefone (cria se não existir) e atualiza os campos de resumo
-// (nome, última mensagem, contador de não lidas). Retorna a linha da conversa.
-// usuarioId é sempre obrigatório: escopa TUDO (busca de conversa existente,
-// busca de cliente vinculado, criação de conversa nova) -- é o que garante
-// que a carteira de um operador nunca vaza/mistura com a de outro, mesmo que
-// dois operadores tenham, cada um, um cliente com o mesmo telefone salvo.
-async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quandoIso, usuarioId, numeroNaoConfirmado }) {
-  if (!usuarioId) throw new Error('usuarioId é obrigatório para upsertConversa');
-
-  // Busca por QUALQUER variação do telefone (com/sem o 9º dígito, ver
-  // normalizarVariantes) -- não só pelo valor exato. Sem isso, a fatura enviada
-  // com o telefone salvo num formato e a resposta do cliente chegando no outro
-  // formato (o WhatsApp sempre manda o formato atual, com 9) nunca se encontram:
-  // vira conversa nova, sem o cliente vinculado, com o nome do perfil dele.
+// Busca a conversa pelo telefone (por QUALQUER variação com/sem o 9º dígito,
+// ver normalizarVariantes) -- não faz nenhuma escrita. usuarioId escopa a
+// busca (carteira de um operador nunca vaza/mistura com a de outro, mesmo que
+// dois operadores tenham, cada um, um cliente com o mesmo telefone salvo).
+async function buscarConversaExistente(telefone, usuarioId) {
   const variantesTelefone = normalizarVariantes(telefone);
-  const { data: existente } = await supabase
+  const { data } = await supabase
     .from('conversas')
     .select('*')
     .in('telefone', variantesTelefone)
     .eq('usuario_id', usuarioId)
     .maybeSingle();
+  return data || null;
+}
 
-  const resumo = texto || (tipo === 'imagem' ? '📷 Imagem' : tipo === 'audio' ? '🎤 Áudio' : tipo === 'documento' ? '📄 Documento' : '');
+function resumoDaMensagem(texto, tipo) {
+  return texto || (tipo === 'imagem' ? '📷 Imagem' : tipo === 'audio' ? '🎤 Áudio' : tipo === 'documento' ? '📄 Documento' : '');
+}
 
-  if (!existente) {
-    let clienteId = null;
-    let nomeCliente = null;
-    const { data: cliente } = await supabase
-      .from('clientes')
-      .select('id, nome')
-      .in('telefone', variantesTelefone)
-      .eq('usuario_id', usuarioId)
-      .maybeSingle();
-    if (cliente) {
-      clienteId = cliente.id;
-      nomeCliente = cliente.nome;
-    }
-
-    // Prioriza o nome já cadastrado (planilha/boleto) sobre o pushName do WhatsApp --
-    // pushName é o que a PESSOA escolheu chamar a si mesma no perfil dela, nem
-    // sempre bate com o nome oficial que tá na fatura.
-    const { data, error } = await supabase
-      .from('conversas')
-      .insert({
-        usuario_id: usuarioId,
-        telefone,
-        cliente_id: clienteId,
-        nome_contato: nomeCliente || nomeContato || (numeroNaoConfirmado ? 'Contato não identificado (WhatsApp não revelou o número)' : null),
-        nao_lidas: fromMe ? 0 : 1,
-        ultima_mensagem: resumo,
-        ultima_mensagem_em: quandoIso,
-        numero_nao_confirmado: Boolean(numeroNaoConfirmado),
-      })
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
+// Cria a conversa (garantido que ainda não existe -- ver buscarConversaExistente).
+async function criarConversa({ telefone, nomeContato, texto, tipo, fromMe, quandoIso, usuarioId, numeroNaoConfirmado, lid }) {
+  const variantesTelefone = normalizarVariantes(telefone);
+  let clienteId = null;
+  let nomeCliente = null;
+  const { data: cliente } = await supabase
+    .from('clientes')
+    .select('id, nome')
+    .in('telefone', variantesTelefone)
+    .eq('usuario_id', usuarioId)
+    .maybeSingle();
+  if (cliente) {
+    clienteId = cliente.id;
+    nomeCliente = cliente.nome;
   }
+
+  // Prioriza o nome já cadastrado (planilha/boleto) sobre o pushName do WhatsApp --
+  // pushName é o que a PESSOA escolheu chamar a si mesma no perfil dela, nem
+  // sempre bate com o nome oficial que tá na fatura.
+  const { data, error } = await supabase
+    .from('conversas')
+    .insert({
+      usuario_id: usuarioId,
+      telefone,
+      cliente_id: clienteId,
+      nome_contato: nomeCliente || nomeContato || (numeroNaoConfirmado ? 'Contato não identificado (WhatsApp não revelou o número)' : null),
+      nao_lidas: fromMe ? 0 : 1,
+      ultima_mensagem: resumoDaMensagem(texto, tipo),
+      ultima_mensagem_em: quandoIso,
+      numero_nao_confirmado: Boolean(numeroNaoConfirmado),
+      lid: lid || null,
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// Atualiza os campos de resumo (nome, última mensagem, contador de não lidas)
+// de uma conversa JÁ EXISTENTE. Só deve ser chamada quando a mensagem em
+// questão é confirmadamente NOVA (ver processarMensagem) -- se fosse chamada
+// pra toda mensagem processada, sem checar se ela já tinha sido gravada antes,
+// um reenvio do mesmo evento pelo WhatsApp (comum em reconexão/histórico)
+// inflaria "não lidas" e poderia trocar "última mensagem" por engano.
+async function atualizarResumoConversa(existente, { nomeContato, texto, tipo, fromMe, quandoIso, usuarioId, lid }) {
+  const variantesTelefone = normalizarVariantes(existente.telefone);
 
   // Só avança "última mensagem" se essa mensagem for mais nova que a que já tinha
   // registrada (o histórico inicial pode chegar fora de ordem).
@@ -240,13 +263,31 @@ async function upsertConversa({ telefone, nomeContato, texto, tipo, fromMe, quan
       cliente_id: clienteIdParaSalvar,
       nome_contato: nomeParaSalvar,
       nao_lidas: fromMe ? 0 : existente.nao_lidas + 1,
-      ...(ehMaisNova ? { ultima_mensagem: resumo, ultima_mensagem_em: quandoIso } : {}),
+      // Nunca sobrescreve um `lid` já guardado, e nunca zera pra null -- só
+      // preenche se a conversa ainda não tinha nenhum registrado (ver
+      // resolverTelefonePorLid, é esse valor que evita recriar fantasma
+      // quando o Baileys não manda os metadados de resolução de novo).
+      ...(lid && !existente.lid ? { lid } : {}),
+      ...(ehMaisNova ? { ultima_mensagem: resumoDaMensagem(texto, tipo), ultima_mensagem_em: quandoIso } : {}),
     })
     .eq('id', existente.id)
     .select()
     .single();
   if (error) throw error;
   return data;
+}
+
+// Acha a conversa pelo telefone (cria se não existir) e SEMPRE atualiza os
+// campos de resumo -- usado por registrarMensagemSaida, onde cada chamada
+// corresponde a exatamente um envio de verdade (nunca um replay de evento do
+// WhatsApp), então não há risco de contar/atualizar 2x a mesma mensagem.
+// usuarioId é sempre obrigatório: escopa TUDO (busca de conversa existente,
+// busca de cliente vinculado, criação de conversa nova).
+async function upsertConversa(params) {
+  if (!params.usuarioId) throw new Error('usuarioId é obrigatório para upsertConversa');
+  const existente = await buscarConversaExistente(params.telefone, params.usuarioId);
+  if (!existente) return criarConversa(params);
+  return atualizarResumoConversa(existente, params);
 }
 
 async function processarMensagem(sock, waMessage, usuarioId) {
@@ -285,10 +326,16 @@ async function processarMensagem(sock, waMessage, usuarioId) {
   //      quem mandou somos nós.
   let telefone;
   let numeroNaoConfirmado = false;
+  let lidParaSalvar = null;
   if (remoteJid.endsWith('@lid')) {
-    const resolvido = await resolverTelefonePorLid(sock, key);
+    const resolvido = await resolverTelefonePorLid(sock, key, usuarioId);
     if (resolvido) {
       telefone = normalizarTelefone(resolvido);
+      // Guarda o "@lid" na conversa resolvida -- é o que permite a PRÓXIMA
+      // mensagem com esse mesmo lid (em qualquer direção) achar essa mesma
+      // conversa mesmo se o Baileys não mandar remoteJidAlt/senderPn de novo
+      // (ver resolverTelefonePorLid e migration-24).
+      lidParaSalvar = remoteJid;
       // Pode já existir uma conversa fantasma de uma vez anterior em que não
       // dava pra resolver -- funde nela agora que finalmente sabemos o número.
       await fundirFantasmaLidSeExistir(`lid-${remoteJid.split('@')[0]}`, telefone, usuarioId).catch((err) =>
@@ -324,7 +371,12 @@ async function processarMensagem(sock, waMessage, usuarioId) {
     }
   }
 
-  const conversa = await upsertConversa({
+  // [2026-09] Acha/cria a conversa SEM atualizar resumo/contador ainda --
+  // isso só acontece depois de confirmar que a mensagem é mesmo nova (ver
+  // abaixo). Uma conversa recém-criada já nasce com o resumo desta mensagem
+  // certo (criarConversa), então não precisa de update extra nesse caso.
+  const existenteAntes = await buscarConversaExistente(telefone, usuarioId);
+  const paramsConversa = {
     telefone,
     // fromMe:true -> pushName é o SEU nome, não o do contato -- nunca usar aqui
     // (é a causa direta do bug "contato com o nome da minha conta", ver acima).
@@ -335,9 +387,11 @@ async function processarMensagem(sock, waMessage, usuarioId) {
     quandoIso,
     usuarioId,
     numeroNaoConfirmado,
-  });
+    lid: lidParaSalvar,
+  };
+  const conversa = existenteAntes ? existenteAntes : await criarConversa(paramsConversa);
 
-  const { error } = await supabase
+  const { data: mensagemInserida, error } = await supabase
     .from('mensagens')
     .upsert(
       {
@@ -351,8 +405,18 @@ async function processarMensagem(sock, waMessage, usuarioId) {
         created_at: quandoIso,
       },
       { onConflict: 'message_id', ignoreDuplicates: true }
-    );
+    )
+    .select()
+    .maybeSingle();
   if (error) throw error;
+
+  // [2026-09] "não lidas"/última mensagem só avança se a mensagem for MESMO
+  // nova (upsert acima devolveu uma linha) -- sem essa checagem, o WhatsApp
+  // reentregando o mesmo evento (reconexão, replay de histórico) inflava o
+  // contador de não lidas de mensagens que já tinham sido lidas.
+  if (existenteAntes && mensagemInserida) {
+    await atualizarResumoConversa(existenteAntes, paramsConversa);
+  }
 }
 
 // Usado pela rota de envio do Chat: grava a mensagem que ACABAMOS de mandar (texto

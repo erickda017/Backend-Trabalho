@@ -8,6 +8,7 @@ import { achatarTags } from '../lib/achatarTags.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 import { limiteSensivel } from '../lib/rateLimit.js';
+import { lerPaginacao } from '../lib/paginacao.js';
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -46,26 +47,36 @@ function tipoPorMimetype(mimetype) {
 // conversas/mensagens/envio de WhatsApp sempre do operador autenticado.
 
 // Lista conversas, mais recente primeiro
+// [2026-09] PAGINADO (mesmo padrão de GET /clientes, ver clientes.routes.js) --
+// antes vinha tudo numa query só, sem `.range()`; o PostgREST corta em 1000
+// linhas por padrão sem avisar, então uma carteira de chat com mais de 1000
+// conversas (plausível depois de meses de uso) perderia as mais antigas da
+// lista em silêncio. Devolve `{ itens, total }`; ver lib/clientesPaginados.ts
+// no front pro helper que pagina até trazer tudo usando esse total.
 router.get('/conversas', async (req, res) => {
+  const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
+
   // [2026-08] QUALIDADE/CHAT: cliente_tags(tags(...)) junto pra mostrar a tag
   // do cliente no card da lista e no cabeçalho da conversa aberta -- mesmo
   // formato achatado (achatarTags) usado em clientes/qualidade/supervisor.
-  const { data, error } = await supabase
+  const { data, error, count } = await supabase
     .from('conversas')
-    .select('*, clientes(nome, pdf_path, pix_code, cliente_tags(tags(id, nome, cor)))')
+    .select('*, clientes(nome, pdf_path, pix_code, cliente_tags(tags(id, nome, cor)))', { count: 'exact' })
     .eq('usuario_id', req.user.id)
-    .order('ultima_mensagem_em', { ascending: false, nullsFirst: false });
+    .order('ultima_mensagem_em', { ascending: false, nullsFirst: false })
+    .range(from, to);
 
   if (error) return res.status(500).json({ error: error.message });
 
   const conversas = data || [];
   const urls = urlsProxyArquivo('faturas', conversas.map((c) => c.clientes?.pdf_path || null));
-  res.json(
-    conversas.map((c, i) => ({
+  res.json({
+    itens: conversas.map((c, i) => ({
       ...c,
       clientes: c.clientes ? { ...achatarTags(c.clientes), pdf_url: urls[i] } : null,
     })),
-  );
+    total: count ?? conversas.length,
+  });
 });
 
 // Histórico de mensagens de uma conversa

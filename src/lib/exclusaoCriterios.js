@@ -20,24 +20,40 @@ import { rotuloSafra } from './safras.js';
 // garante um teto alto o bastante pra não truncar em silêncio.
 const LIMITE_LINHAS = 50000;
 
-// [CRÍTICO -- bug real corrigido 2026-09] Antes esta função só logava o erro
-// e seguia a vida (mesmo "best-effort" que limpezaAutomatica.js usa) -- só
-// que quem chama SEMPRE limpava pdf_path do cliente logo em seguida, MESMO
-// quando a remoção do Storage falhava de verdade. Resultado: o arquivo
-// ficava órfão no bucket pra sempre (ninguém mais sabe o path dele, já que
-// a única referência acabou de ser apagada do banco) e o operador via
-// "sucesso" sem saber que o espaço em disco não foi liberado -- exatamente
-// o sintoma relatado (Storage size não caiu depois de apagar). Agora
-// devolve QUAIS caminhos falharam, e quem chama só limpa o ponteiro no
-// banco pros que realmente confirmaram remoção.
+// [CRÍTICO -- bug real corrigido 2026-09, 2 rodadas] Rodada 1: esta função só
+// logava o erro e seguia a vida (mesmo "best-effort" que limpezaAutomatica.js
+// usa) -- só que quem chama SEMPRE limpava pdf_path do cliente logo em
+// seguida, MESMO quando a remoção do Storage falhava de verdade. Corrigido
+// pra devolver QUAIS caminhos falharam, baseado em `error`.
+//
+// Rodada 2 (relatado: painel dizia "apagado", bucket continuava com TODOS os
+// arquivos): a API do Supabase Storage pode devolver `error: null` e mesmo
+// assim não remover nada -- ela não erra pra "arquivo não encontrado" nem
+// pra alguns cenários de permissão, só devolve em `data` a lista do que
+// FOI removido de verdade. Confiar só em `error` (rodada 1) não pega esse
+// caso -- por isso agora comparamos o tamanho de `data` com o do lote
+// pedido: se vier menor (ou vazio) sem erro nenhum, trata o LOTE INTEIRO
+// como não confirmado (não dá pra saber com certeza QUAL item específico
+// falhou só pelo tamanho da lista, e é sempre mais seguro não limpar um
+// ponteiro que ainda pode estar apontando pra um arquivo real).
 async function removerDoStorageEmLotes(bucket, caminhos) {
   const TAMANHO_LOTE = 100; // limite prático da API do Supabase Storage por chamada de .remove()
   const falharam = [];
   for (let i = 0; i < caminhos.length; i += TAMANHO_LOTE) {
     const lote = caminhos.slice(i, i + TAMANHO_LOTE);
-    const { error } = await supabase.storage.from(bucket).remove(lote);
+    const { data, error } = await supabase.storage.from(bucket).remove(lote);
     if (error) {
       console.error(`[exclusao] erro ao remover arquivos do bucket ${bucket}:`, error.message);
+      falharam.push(...lote);
+      continue;
+    }
+    const confirmados = (data || []).length;
+    if (confirmados < lote.length) {
+      console.error(
+        `[exclusao] ATENÇÃO -- Storage não confirmou a remoção de todos os arquivos pedidos (bucket=${bucket}): ` +
+          `pedimos ${lote.length}, confirmou ${confirmados}, SEM erro reportado. Isso indica bucket/policy errado ` +
+          `ou paths que não batem com o que está salvo -- confira manualmente no painel do Supabase. Caminhos pedidos: ${lote.join(', ')}`,
+      );
       falharam.push(...lote);
     }
   }

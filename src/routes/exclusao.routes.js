@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { CRITERIOS, montarResumoExclusao } from '../lib/exclusaoCriterios.js';
 import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
 import { limiteSensivel } from '../lib/rateLimit.js';
+import { supabase, BUCKET } from '../lib/supabase.js';
 
 const router = Router();
 
@@ -69,6 +70,41 @@ router.post('/:criterio/executar', limiteSensivel, async (req, res) => {
     console.error(`[exclusao] erro ao executar critério ${criterioId}:`, err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+// [2026-09] DIAGNÓSTICO -- relatado: painel dizia "apagado" mas os arquivos
+// continuavam no bucket. Sobe um arquivo de teste descartável, tenta apagar
+// na hora e devolve o resultado CRU de cada etapa (sem esconder nada atrás
+// de "best-effort") -- isola se o problema é permissão de escrita, de
+// remoção, ou nome de bucket errado, sem mexer em nenhum dado real.
+router.get('/diagnostico-storage', async (req, res) => {
+  const caminho = `_diagnostico/teste-${Date.now()}.txt`;
+  const resultado = { bucket: BUCKET, caminho };
+
+  const { error: uploadError } = await supabase.storage
+    .from(BUCKET)
+    .upload(caminho, Buffer.from('arquivo de teste do diagnóstico do painel de exclusão'), {
+      contentType: 'text/plain',
+    });
+  resultado.upload = uploadError ? { ok: false, erro: uploadError.message } : { ok: true };
+
+  if (uploadError) {
+    return res.json(resultado); // sem upload bem-sucedido, não faz sentido tentar remover
+  }
+
+  const { data: removeData, error: removeError } = await supabase.storage.from(BUCKET).remove([caminho]);
+  resultado.remocao = removeError
+    ? { ok: false, erro: removeError.message }
+    : { ok: (removeData || []).length === 1, confirmados: (removeData || []).map((d) => d.name) };
+
+  // Confere de verdade se o arquivo ainda existe (list() na pasta) --
+  // independe do que a chamada de remove() alegou, é a fonte da verdade.
+  const { data: listagem, error: listError } = await supabase.storage.from(BUCKET).list('_diagnostico');
+  resultado.confirmacao_via_list = listError
+    ? { erro: listError.message }
+    : { ainda_existe: (listagem || []).some((f) => `_diagnostico/${f.name}` === caminho) };
+
+  res.json(resultado);
 });
 
 export default router;

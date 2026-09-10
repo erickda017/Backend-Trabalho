@@ -73,7 +73,12 @@ function montarEnvioResumo(envio, contadores) {
 //      pelo desfecho registrado numa tratativa em vez de uma tag manual.
 // Retorna também quantos ficaram de fora por cada motivo, pra UI poder
 // avisar em vez de só devolver uma lista menor sem explicação.
-async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, modoElegibilidade = 'pdf') {
+// [2026-09] ATIVAÇÃO CHIP: `campanha` filtra os candidatos pra nunca misturar
+// cliente de cobrança com cliente de chip no mesmo lote (ver
+// migration-25-ativacao-chip.sql). Cliente de chip não tem PDF/Pix (esses
+// conceitos não existem nessa campanha) -- elegibilidade é sempre "livre"
+// pra ele, ignorando `modoElegibilidade` por completo.
+async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, modoElegibilidade = 'pdf', campanha = 'cobranca') {
   const conjunto = new Set(clienteIds);
 
   if (Array.isArray(tagIds) && tagIds.length) {
@@ -88,17 +93,18 @@ async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, modoE
   if (!conjunto.size) return { clienteIds: [], semPdf: 0, bloqueadosPorTag: 0 };
 
   // Dono real -- fecha a brecha de um cliente_id "emprestado" de outro
-  // usuário ter sido colado no body da requisição.
+  // usuário (ou de outra campanha) ter sido colado no body da requisição.
   const { data: donos, error: donosError } = await supabase
     .from('clientes')
     .select('id, pdf_path, pix_code, status_operador')
     .in('id', [...conjunto])
-    .eq('usuario_id', usuarioId);
+    .eq('usuario_id', usuarioId)
+    .eq('campanha', campanha);
   if (donosError) throw donosError;
 
   const candidatos = donos || [];
   const elegivel = (c) => {
-    if (modoElegibilidade === 'livre') return true;
+    if (campanha === 'chip_ativacao' || modoElegibilidade === 'livre') return true;
     return modoElegibilidade === 'pix' ? Boolean(c.pix_code) : Boolean(c.pdf_path);
   };
   const semPdf = candidatos.filter((c) => !elegivel(c)).length;
@@ -185,7 +191,14 @@ router.post('/teste', limiteSensivel, async (req, res) => {
 // ---------------------------------------------------------------------------
 router.post('/', limiteSensivel, async (req, res) => {
   const usuarioId = req.user.id;
-  const { mensagem, mensagens, cliente_ids = [], tag_ids = [], intervalo_ms, janela_ms, agendado_para, enviar_pix, livre } = req.body || {};
+  const { mensagem, mensagens, cliente_ids = [], tag_ids = [], intervalo_ms, janela_ms, agendado_para, enviar_pix, livre, campanha } = req.body || {};
+  // [2026-09] ATIVAÇÃO CHIP: qual carteira este lote dispara pra -- default
+  // 'cobranca' (comportamento de sempre, a tela de Disparos normal nunca
+  // manda esse campo). Ver migration-25-ativacao-chip.sql.
+  if (campanha !== undefined && campanha !== 'cobranca' && campanha !== 'chip_ativacao') {
+    return res.status(400).json({ error: "campanha deve ser 'cobranca' ou 'chip_ativacao'" });
+  }
+  const campanhaDoEnvio = campanha === 'chip_ativacao' ? 'chip_ativacao' : 'cobranca';
   const enviarPix = enviar_pix === true;
   // [2026-09] `livre`: disparo sem exigir PDF nem Pix cadastrado (ver
   // comentário de `resolverClienteIds` acima). Não faz sentido junto com
@@ -210,7 +223,7 @@ router.post('/', limiteSensivel, async (req, res) => {
 
   let resolucao;
   try {
-    resolucao = await resolverClienteIds(cliente_ids, tag_ids, usuarioId, modoElegibilidade);
+    resolucao = await resolverClienteIds(cliente_ids, tag_ids, usuarioId, modoElegibilidade, campanhaDoEnvio);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -236,6 +249,7 @@ router.post('/', limiteSensivel, async (req, res) => {
       intervalo_ms: intervalo_ms || null,
       janela_ms: janela_ms || null,
       enviar_pix: enviarPix,
+      campanha: campanhaDoEnvio,
     })
     .select()
     .single();
@@ -504,8 +518,11 @@ router.get('/:id/progresso', async (req, res) => {
 router.get('/', async (req, res) => {
   const { busca, status, de, ate } = req.query;
   const { from, to } = lerPaginacao(req.query, { perPageDefault: 500, perPageMax: 5000 });
+  // [2026-09] ATIVAÇÃO CHIP: sem filtro explícito, sempre 'cobranca' (a tela
+  // de Histórico/Disparos normal nunca manda esse parâmetro).
+  const campanha = req.query.campanha === 'chip_ativacao' ? 'chip_ativacao' : 'cobranca';
 
-  let query = supabase.from('envios').select('*', { count: 'exact' }).eq('usuario_id', req.user.id).order('created_at', { ascending: false });
+  let query = supabase.from('envios').select('*', { count: 'exact' }).eq('usuario_id', req.user.id).eq('campanha', campanha).order('created_at', { ascending: false });
 
   if (busca) query = query.or(`lote.ilike.%${escaparFiltroPostgrest(busca)}%,template_mensagem.ilike.%${escaparFiltroPostgrest(busca)}%`);
   if (status && status !== 'todos') query = query.eq('status', status);

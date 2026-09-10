@@ -137,9 +137,16 @@ export async function processarImportacaoLotePronto({ itensProntos, linhasSemDad
       return { tipo: 'semPdf', linha: item };
     }
 
-    // upsert do cliente por (usuario_id, telefone) -- evita duplicar se
-    // reimportar a planilha, sem colidir com o cliente de outro operador que
-    // por acaso tenha o mesmo telefone salvo (ver migration-13-multi-tenant.sql).
+    // upsert do cliente por (usuario_id, telefone, campanha) -- evita duplicar
+    // se reimportar a planilha, sem colidir com o cliente de outro operador
+    // que por acaso tenha o mesmo telefone salvo (ver
+    // migration-13-multi-tenant.sql). campanha nunca vem no payload aqui
+    // (default 'cobranca' do banco) -- este fluxo é só da campanha de fatura,
+    // ver importLoteChip.js pro equivalente de Ativação Chip. [2026-09] O
+    // conflito precisou passar a incluir `campanha` (ver
+    // migration-25-ativacao-chip.sql) -- sem isso, o mesmo telefone cadastrado
+    // na campanha de chip seria roubado/sobrescrito por uma reimportação da
+    // planilha de fatura.
     const { data: cliente, error: clienteError } = await supabase
       .from('clientes')
       .upsert(
@@ -150,7 +157,7 @@ export async function processarImportacaoLotePronto({ itensProntos, linhasSemDad
           valor: item.valor,
           vencimento: item.vencimento,
         },
-        { onConflict: 'usuario_id,telefone' },
+        { onConflict: 'usuario_id,telefone,campanha' },
       )
       .select()
       .single();

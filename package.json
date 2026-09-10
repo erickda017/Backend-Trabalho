@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node --expose-gc src/server.js",
-    "test": "node --test src/lib/**/*.test.js"
+    "test": "node --test src/lib/**/*.test.js src/services/**/*.test.js"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

@@ -55,6 +55,11 @@ function tipoPorMimetype(mimetype) {
 // no front pro helper que pagina até trazer tudo usando esse total.
 router.get('/conversas', async (req, res) => {
   const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
+  // [2026-09] ATIVAÇÃO CHIP: campanha separa as duas carteiras de chat (ver
+  // migration-25-ativacao-chip.sql) -- sem filtro explícito, sempre
+  // 'cobranca' (comportamento de sempre). A tela de Ativação Chip passa
+  // ?campanha=chip_ativacao.
+  const campanha = req.query.campanha === 'chip_ativacao' ? 'chip_ativacao' : 'cobranca';
 
   // [2026-08] QUALIDADE/CHAT: cliente_tags(tags(...)) junto pra mostrar a tag
   // do cliente no card da lista e no cabeçalho da conversa aberta -- mesmo
@@ -63,6 +68,7 @@ router.get('/conversas', async (req, res) => {
     .from('conversas')
     .select('*, clientes(nome, pdf_path, pix_code, cliente_tags(tags(id, nome, cor)))', { count: 'exact' })
     .eq('usuario_id', req.user.id)
+    .eq('campanha', campanha)
     .order('ultima_mensagem_em', { ascending: false, nullsFirst: false })
     .range(from, to);
 
@@ -196,7 +202,7 @@ router.post('/conversas/:id/mensagens', limiteSensivel, uploadAnexoComTratamento
 
   const { data: conversa, error: conversaError } = await supabase
     .from('conversas')
-    .select('telefone, numero_nao_confirmado')
+    .select('telefone, numero_nao_confirmado, campanha')
     .eq('id', id)
     .eq('usuario_id', usuarioId)
     .maybeSingle();
@@ -272,6 +278,7 @@ router.post('/conversas/:id/mensagens', limiteSensivel, uploadAnexoComTratamento
       anexoNome,
       messageId,
       usuarioId,
+      campanha: conversa.campanha,
     });
 
     // A resposta pro front (que renderiza a mensagem na hora, sem F5) precisa
@@ -297,7 +304,7 @@ router.post('/conversas/:id/enviar-fatura', async (req, res) => {
 
   const { data: conversa, error: conversaError } = await supabase
     .from('conversas')
-    .select('telefone, cliente_id, clientes(nome, pdf_path, pix_code)')
+    .select('telefone, cliente_id, campanha, clientes(nome, pdf_path, pix_code)')
     .eq('id', id)
     .eq('usuario_id', usuarioId)
     .maybeSingle();
@@ -349,6 +356,7 @@ router.post('/conversas/:id/enviar-fatura', async (req, res) => {
         anexoNome: nomeArquivo,
         messageId,
         usuarioId,
+        campanha: conversa.campanha,
       });
       // Resposta pro front usa o path do proxy (não a signed URL crua que
       // acabamos de gerar pro Baileys) -- mesmo motivo do envio de anexo
@@ -373,6 +381,7 @@ router.post('/conversas/:id/enviar-fatura', async (req, res) => {
         tipo: 'texto',
         messageId: pixMessageId,
         usuarioId,
+        campanha: conversa.campanha,
       });
       linhaPix = mensagem;
     }

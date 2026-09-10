@@ -122,7 +122,12 @@ router.post('/importar-lista', limiteSensivel, async (req, res) => {
           numero_contrato: item.numero_contrato ?? null,
           data_contrato: item.data_contrato ?? null,
         },
-        { onConflict: 'usuario_id,telefone' },
+        // [2026-09] Precisa incluir `campanha` no conflito (ver
+        // migration-25-ativacao-chip.sql) -- este fluxo é sempre da campanha
+        // 'cobranca' (default, nunca enviado aqui); sem `campanha` no
+        // conflito, um telefone já cadastrado na campanha de chip seria
+        // roubado por esta importação.
+        { onConflict: 'usuario_id,telefone,campanha' },
       )
       .select('id')
       .single();
@@ -304,11 +309,17 @@ router.get('/verificar-vencimentos/status', (req, res) => {
 router.get('/', async (req, res) => {
   const { busca, tag, com_pix, sem_pix, com_pdf, sem_pdf, recebeu_disparo, safra, tipo_fatura } = req.query;
   const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
+  // [2026-09] ATIVAÇÃO CHIP: campanha separa as duas carteiras (ver
+  // migration-25-ativacao-chip.sql) -- sem filtro explícito, sempre
+  // 'cobranca' (comportamento de sempre, a tela de Clientes nunca passa esse
+  // parâmetro). A tela de Ativação Chip passa ?campanha=chip_ativacao.
+  const campanha = req.query.campanha === 'chip_ativacao' ? 'chip_ativacao' : 'cobranca';
 
   let query = supabase
     .from('clientes')
     .select('*, cliente_tags(tags(id, nome, cor))', { count: 'exact' })
     .eq('usuario_id', req.user.id)
+    .eq('campanha', campanha)
     .order('nome');
 
   if (busca) {
@@ -450,10 +461,13 @@ router.get('/:id', async (req, res) => {
 
 // Cria cliente (sem PDF ainda)
 router.post('/', async (req, res) => {
-  const { nome, telefone, valor, vencimento } = req.body;
+  const { nome, telefone, valor, vencimento, campanha } = req.body;
 
   if (!nome || !telefone) {
     return res.status(400).json({ error: 'nome e telefone são obrigatórios' });
+  }
+  if (campanha !== undefined && campanha !== 'cobranca' && campanha !== 'chip_ativacao') {
+    return res.status(400).json({ error: "campanha deve ser 'cobranca' ou 'chip_ativacao'" });
   }
 
   // aceita "150,00" (padrão BR) além de "150.00" -- coluna no banco é numérica e rejeita vírgula
@@ -465,7 +479,14 @@ router.post('/', async (req, res) => {
 
   const { data, error } = await supabase
     .from('clientes')
-    .insert({ usuario_id: req.user.id, nome, telefone: telefoneNormalizado, valor: valorNormalizado, vencimento })
+    .insert({
+      usuario_id: req.user.id,
+      nome,
+      telefone: telefoneNormalizado,
+      valor: valorNormalizado,
+      vencimento,
+      ...(campanha ? { campanha } : {}),
+    })
     .select()
     .single();
 
@@ -531,7 +552,13 @@ router.post('/:id/pdf', limiteSensivel, uploadPdfComTratamentoDeErro, async (req
 // Atualiza cliente
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { nome, telefone, valor, vencimento, tipo_fatura, data_prazo, numero_contrato, data_contrato } = req.body;
+  const {
+    nome, telefone, valor, vencimento, tipo_fatura, data_prazo, numero_contrato, data_contrato,
+    // [2026-09] ATIVAÇÃO CHIP: campos exclusivos dessa campanha (ver
+    // migration-25-ativacao-chip.sql) -- ficam undefined/ignorados pra
+    // clientes de cobrança, que nunca mandam esses campos.
+    telefone_2, telefone_3, operadora, os_numero, cpf, cidade, bko_responsavel, vendedor,
+  } = req.body;
 
   if (tipo_fatura !== undefined && tipo_fatura !== null && tipo_fatura !== 'FPD' && tipo_fatura !== 'SPD') {
     return res.status(400).json({ error: "tipo_fatura deve ser 'FPD', 'SPD' ou null" });
@@ -555,11 +582,23 @@ router.put('/:id', async (req, res) => {
   // são dados da FATURA e propagam pros números vinculados (ver
   // lib/faturaPropagacao.js) -- gravados juntos numa mesma chamada, senão o
   // grupo ficaria com valor/vencimento divergente entre os números.
+  const telefone2Normalizado = telefone_2 !== undefined ? (telefone_2 ? normalizarTelefone(telefone_2) : null) : undefined;
+  const telefone3Normalizado = telefone_3 !== undefined ? (telefone_3 ? normalizarTelefone(telefone_3) : null) : undefined;
+
   const { error: errorProprios } = await supabase
     .from('clientes')
     .update({
       ...(nome !== undefined ? { nome } : {}),
       ...(telefoneNormalizado ? { telefone: telefoneNormalizado } : {}),
+      // Campos de Ativação Chip -- só entram no update se enviados.
+      ...(telefone2Normalizado !== undefined ? { telefone_2: telefone2Normalizado } : {}),
+      ...(telefone3Normalizado !== undefined ? { telefone_3: telefone3Normalizado } : {}),
+      ...(operadora !== undefined ? { operadora } : {}),
+      ...(os_numero !== undefined ? { os_numero } : {}),
+      ...(cpf !== undefined ? { cpf } : {}),
+      ...(cidade !== undefined ? { cidade } : {}),
+      ...(bko_responsavel !== undefined ? { bko_responsavel } : {}),
+      ...(vendedor !== undefined ? { vendedor } : {}),
     })
     .eq('id', id)
     .eq('usuario_id', req.user.id);

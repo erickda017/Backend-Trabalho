@@ -142,17 +142,22 @@ async function fundirFantasmaLidSeExistir(telefonePseudo, telefoneReal, usuarioI
   if (telefonePseudo === telefoneReal) return;
   const { data: fantasma } = await supabase
     .from('conversas')
-    .select('id')
+    .select('id, campanha')
     .eq('telefone', telefonePseudo)
     .eq('usuario_id', usuarioId)
     .maybeSingle();
   if (!fantasma) return;
 
+  // [2026-09] ATIVAÇÃO CHIP: a fusão precisa acontecer DENTRO da mesma
+  // campanha da conversa fantasma -- sem isso, um telefone que existe nas
+  // duas campanhas poderia fundir a fantasma de uma campanha na conversa
+  // real da OUTRA (ver migration-25-ativacao-chip.sql).
   const { data: real } = await supabase
     .from('conversas')
     .select('id')
     .eq('telefone', telefoneReal)
     .eq('usuario_id', usuarioId)
+    .eq('campanha', fantasma.campanha)
     .maybeSingle();
   if (real) {
     await supabase.from('mensagens').update({ conversa_id: real.id }).eq('conversa_id', fantasma.id);
@@ -165,35 +170,81 @@ async function fundirFantasmaLidSeExistir(telefonePseudo, telefoneReal, usuarioI
   }
 }
 
-// Busca a conversa pelo telefone (por QUALQUER variação com/sem o 9º dígito,
-// ver normalizarVariantes) -- não faz nenhuma escrita. usuarioId escopa a
-// busca (carteira de um operador nunca vaza/mistura com a de outro, mesmo que
-// dois operadores tenham, cada um, um cliente com o mesmo telefone salvo).
-async function buscarConversaExistente(telefone, usuarioId) {
+// Busca TODAS as conversas de um telefone (por QUALQUER variação com/sem o 9º
+// dígito, ver normalizarVariantes) -- não faz nenhuma escrita. usuarioId
+// escopa a busca (carteira de um operador nunca vaza/mistura com a de outro).
+// [2026-09] ATIVAÇÃO CHIP: pode devolver MAIS DE UMA linha agora -- o mesmo
+// telefone pode ter uma conversa de cobrança e outra de chip (ver
+// migration-25-ativacao-chip.sql, índice único agora inclui `campanha`).
+async function buscarConversasPorTelefone(telefone, usuarioId) {
   const variantesTelefone = normalizarVariantes(telefone);
   const { data } = await supabase
     .from('conversas')
     .select('*')
     .in('telefone', variantesTelefone)
-    .eq('usuario_id', usuarioId)
-    .maybeSingle();
-  return data || null;
+    .eq('usuario_id', usuarioId);
+  return data || [];
+}
+
+// Entre as conversas encontradas pro mesmo telefone (0, 1 ou 2 -- uma por
+// campanha), escolhe a de atividade mais recente. Usado só pra mensagem de
+// ENTRADA (ver processarMensagem) -- não tem como saber por qual campanha o
+// cliente está respondendo, então assume que é a conversa mais "viva".
+// Mensagem de SAÍDA nunca usa isso -- já sabe a campanha de contexto (ver
+// buscarConversaPorCampanha/upsertConversa).
+function escolherConversaMaisRecente(conversas) {
+  if (!conversas.length) return null;
+  return [...conversas].sort((a, b) => {
+    const dataA = a.ultima_mensagem_em ? new Date(a.ultima_mensagem_em).getTime() : 0;
+    const dataB = b.ultima_mensagem_em ? new Date(b.ultima_mensagem_em).getTime() : 0;
+    return dataB - dataA;
+  })[0];
+}
+
+// Busca a conversa de um telefone numa campanha ESPECÍFICA -- usado quando a
+// campanha já é conhecida de antemão (mensagem de saída: disparo em massa ou
+// resposta manual pelo chat, ambos sempre operam dentro de uma campanha
+// certa, nunca ambígua).
+async function buscarConversaPorCampanha(telefone, usuarioId, campanha) {
+  const conversas = await buscarConversasPorTelefone(telefone, usuarioId);
+  return conversas.find((c) => c.campanha === campanha) || null;
+}
+
+// Quando chega uma mensagem de um telefone que NUNCA teve conversa (nem de
+// cobrança nem de chip), decide em qual campanha a conversa nova nasce: se
+// esse telefone só está cadastrado numa campanha em `clientes`, usa essa; se
+// está nas duas (ou em nenhuma), usa 'cobranca' (default seguro, mesmo
+// comportamento de antes da Ativação Chip existir).
+async function decidirCampanhaParaNovaConversa(telefone, usuarioId) {
+  const variantesTelefone = normalizarVariantes(telefone);
+  const { data } = await supabase
+    .from('clientes')
+    .select('campanha')
+    .in('telefone', variantesTelefone)
+    .eq('usuario_id', usuarioId);
+  const campanhas = new Set((data || []).map((c) => c.campanha));
+  return campanhas.size === 1 ? [...campanhas][0] : 'cobranca';
 }
 
 function resumoDaMensagem(texto, tipo) {
   return texto || (tipo === 'imagem' ? '📷 Imagem' : tipo === 'audio' ? '🎤 Áudio' : tipo === 'documento' ? '📄 Documento' : '');
 }
 
-// Cria a conversa (garantido que ainda não existe -- ver buscarConversaExistente).
-async function criarConversa({ telefone, nomeContato, texto, tipo, fromMe, quandoIso, usuarioId, numeroNaoConfirmado, lid }) {
+// Cria a conversa (garantido que ainda não existe nessa campanha -- ver
+// buscarConversaPorCampanha/buscarConversasPorTelefone).
+async function criarConversa({ telefone, nomeContato, texto, tipo, fromMe, quandoIso, usuarioId, numeroNaoConfirmado, lid, campanha }) {
   const variantesTelefone = normalizarVariantes(telefone);
   let clienteId = null;
   let nomeCliente = null;
+  // [2026-09] ATIVAÇÃO CHIP: casa o cliente TAMBÉM pela campanha da conversa
+  // -- sem isso, se o telefone existir nas duas campanhas, uma conversa de
+  // chip podia linkar por engano no cliente de cobrança (ou vice-versa).
   const { data: cliente } = await supabase
     .from('clientes')
     .select('id, nome')
     .in('telefone', variantesTelefone)
     .eq('usuario_id', usuarioId)
+    .eq('campanha', campanha || 'cobranca')
     .maybeSingle();
   if (cliente) {
     clienteId = cliente.id;
@@ -215,6 +266,7 @@ async function criarConversa({ telefone, nomeContato, texto, tipo, fromMe, quand
       ultima_mensagem_em: quandoIso,
       numero_nao_confirmado: Boolean(numeroNaoConfirmado),
       lid: lid || null,
+      campanha: campanha || 'cobranca',
     })
     .select()
     .single();
@@ -240,11 +292,15 @@ async function atualizarResumoConversa(existente, { nomeContato, texto, tipo, fr
   let nomeParaSalvar = existente.nome_contato;
   let clienteIdParaSalvar = existente.cliente_id;
   if (!existente.cliente_id) {
+    // Casa pela MESMA campanha da conversa (ver criarConversa) -- nunca a
+    // campanha do parâmetro de entrada, que pra mensagem de entrada pode nem
+    // existir ainda (existente.campanha é sempre a fonte da verdade aqui).
     const { data: cliente } = await supabase
       .from('clientes')
       .select('id, nome')
       .in('telefone', variantesTelefone)
       .eq('usuario_id', usuarioId)
+      .eq('campanha', existente.campanha || 'cobranca')
       .maybeSingle();
     if (cliente) {
       // Vincula agora o cliente_id que ainda não tinha sido linkado -- cobre o
@@ -285,8 +341,12 @@ async function atualizarResumoConversa(existente, { nomeContato, texto, tipo, fr
 // busca de cliente vinculado, criação de conversa nova).
 async function upsertConversa(params) {
   if (!params.usuarioId) throw new Error('usuarioId é obrigatório para upsertConversa');
-  const existente = await buscarConversaExistente(params.telefone, params.usuarioId);
-  if (!existente) return criarConversa(params);
+  // Mensagem de SAÍDA sempre sabe a campanha de contexto (disparo ou chat de
+  // uma aba específica) -- busca/cria DENTRO dela, nunca ambíguo (diferente
+  // de mensagem de entrada, ver processarMensagem/escolherConversaMaisRecente).
+  const campanha = params.campanha || 'cobranca';
+  const existente = await buscarConversaPorCampanha(params.telefone, params.usuarioId, campanha);
+  if (!existente) return criarConversa({ ...params, campanha });
   return atualizarResumoConversa(existente, params);
 }
 
@@ -375,7 +435,14 @@ async function processarMensagem(sock, waMessage, usuarioId) {
   // isso só acontece depois de confirmar que a mensagem é mesmo nova (ver
   // abaixo). Uma conversa recém-criada já nasce com o resumo desta mensagem
   // certo (criarConversa), então não precisa de update extra nesse caso.
-  const existenteAntes = await buscarConversaExistente(telefone, usuarioId);
+  //
+  // [2026-09] ATIVAÇÃO CHIP: mensagem de ENTRADA não sabe por qual campanha o
+  // cliente está respondendo -- se ele tem conversa nas duas, cai na mais
+  // recente (escolherConversaMaisRecente); sem nenhuma conversa ainda, a
+  // campanha nasce a partir do cadastro em `clientes` (decidirCampanhaParaNovaConversa).
+  const candidatos = await buscarConversasPorTelefone(telefone, usuarioId);
+  const existenteAntes = escolherConversaMaisRecente(candidatos);
+  const campanhaParaConversa = existenteAntes ? existenteAntes.campanha : await decidirCampanhaParaNovaConversa(telefone, usuarioId);
   const paramsConversa = {
     telefone,
     // fromMe:true -> pushName é o SEU nome, não o do contato -- nunca usar aqui
@@ -388,6 +455,7 @@ async function processarMensagem(sock, waMessage, usuarioId) {
     usuarioId,
     numeroNaoConfirmado,
     lid: lidParaSalvar,
+    campanha: campanhaParaConversa,
   };
   const conversa = existenteAntes ? existenteAntes : await criarConversa(paramsConversa);
 
@@ -423,9 +491,9 @@ async function processarMensagem(sock, waMessage, usuarioId) {
 // e/ou anexo), sem precisar rebaixar mídia -- já temos o anexo em mãos.
 // Quando o eco dessa mesma mensagem chegar pelo messages.upsert (fromMe: true), o
 // upsert por message_id (ignoreDuplicates) evita duplicar.
-export async function registrarMensagemSaida({ telefone, texto, tipo, anexoPath, anexoNome, messageId, usuarioId }) {
+export async function registrarMensagemSaida({ telefone, texto, tipo, anexoPath, anexoNome, messageId, usuarioId, campanha }) {
   const quandoIso = new Date().toISOString();
-  const conversa = await upsertConversa({ telefone, nomeContato: null, texto, tipo, fromMe: true, quandoIso, usuarioId });
+  const conversa = await upsertConversa({ telefone, nomeContato: null, texto, tipo, fromMe: true, quandoIso, usuarioId, campanha });
 
   const { data, error } = await supabase
     .from('mensagens')

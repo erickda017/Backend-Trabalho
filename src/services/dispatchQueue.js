@@ -148,8 +148,29 @@ async function enviarItem(item, envio, usuarioId) {
   const slot = envio.slot || escolherSlotParaEnvio(usuarioId) || 1;
 
   try {
-    const { existe, jid } = await validarNumero(cliente.telefone, usuarioId, slot);
-    if (!existe) {
+    // [2026-09] ATIVAÇÃO CHIP: cliente dessa campanha pode ter até 3 telefones
+    // (telefone/telefone_2/telefone_3, ver migration-25-ativacao-chip.sql) --
+    // tenta em ordem até um existir no WhatsApp, em vez de desistir no
+    // primeiro que falhar (planilha de origem não garante qual dos 3 está
+    // certo). Clientes de cobrança continuam com um único telefone, sem
+    // mudança de comportamento.
+    const telefonesCandidatos =
+      cliente.campanha === 'chip_ativacao'
+        ? [cliente.telefone, cliente.telefone_2, cliente.telefone_3].filter(Boolean)
+        : [cliente.telefone];
+
+    let telefoneUsado = null;
+    let jid = null;
+    for (const candidato of telefonesCandidatos) {
+      const resultado = await validarNumero(candidato, usuarioId, slot);
+      if (resultado.existe) {
+        telefoneUsado = candidato;
+        jid = resultado.jid;
+        break;
+      }
+    }
+
+    if (!telefoneUsado) {
       await supabase
         .from('envio_itens')
         .update({ status: 'numero_invalido', erro: 'Número não encontrado no WhatsApp' })
@@ -166,7 +187,7 @@ async function enviarItem(item, envio, usuarioId) {
 
     const { messageId } = pdfUrlAssinada
       ? await enviarMensagemComPdf({
-          numero: cliente.telefone,
+          numero: telefoneUsado,
           jid,
           mensagem,
           pdfUrl: pdfUrlAssinada,
@@ -174,7 +195,7 @@ async function enviarItem(item, envio, usuarioId) {
           usuarioId,
           slot,
         })
-      : await enviarMensagemTexto({ numero: cliente.telefone, jid, mensagem, usuarioId, slot });
+      : await enviarMensagemTexto({ numero: telefoneUsado, jid, mensagem, usuarioId, slot });
 
     // A partir daqui a mensagem JÁ FOI enviada de verdade pelo WhatsApp --
     // ver comentário em atualizarStatusEnviado sobre por que essa gravação
@@ -188,6 +209,9 @@ async function enviarItem(item, envio, usuarioId) {
       // Registra qual dos 2 Zaps enviou de verdade -- coluna já existia
       // (migration-4), só não era mais preenchida desde a virada single-Zap.
       slot,
+      // Qual dos até 3 telefones respondeu de verdade -- só relevante (e só
+      // preenchido) pra clientes de chip, ver início desta função.
+      ...(cliente.campanha === 'chip_ativacao' ? { telefone_usado: telefoneUsado } : {}),
     });
     if (!statusGravado) {
       console.error(
@@ -200,13 +224,14 @@ async function enviarItem(item, envio, usuarioId) {
     // Chat grava (registrarMensagemSaida), então o histórico fica completo dos dois lados.
     try {
       await registrarMensagemSaida({
-        telefone: cliente.telefone,
+        telefone: telefoneUsado,
         texto: mensagem,
         tipo: pdfUrlAssinada ? 'documento' : 'texto',
         anexoPath: pdfUrlAssinada ? cliente.pdf_path : null,
         anexoNome: pdfUrlAssinada ? `fatura-${cliente.nome}.pdf` : null,
         messageId,
         usuarioId,
+        campanha: envio.campanha || 'cobranca',
       });
     } catch (chatErr) {
       console.error(`[dispatch] erro ao registrar no chat para ${cliente.nome}:`, chatErr.message);

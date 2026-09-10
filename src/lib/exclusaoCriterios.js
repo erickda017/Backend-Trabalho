@@ -95,6 +95,35 @@ const pdfsPorTipoFatura = {
   },
 };
 
+// [2026-09] `safra` é gerada a partir de `data_prazo` (ver
+// migration-19-safras-faturas.sql) -- cadastros de ANTES desse conceito
+// existir (planilha antiga, cadastro manual sem prazo) ficam com `safra`
+// null pra sempre. Sem este critério, esses PDFs "legados" nunca apareciam
+// em NENHUM critério (pdfs_por_safra só pega quem tem safra preenchida) --
+// relatado pelo usuário: 400+ PDFs assim, invisíveis pro painel inteiro.
+async function buscarClientesComPdfSemSafra() {
+  const { data, error } = await supabase
+    .from('clientes')
+    .select('id, nome, telefone, pdf_path')
+    .is('safra', null)
+    .not('pdf_path', 'is', null)
+    .limit(LIMITE_LINHAS);
+  if (error) throw error;
+  return data || [];
+}
+
+const pdfsSemSafra = {
+  label: 'PDFs sem safra (cadastros antigos)',
+  async contar() {
+    const clientes = await buscarClientesComPdfSemSafra();
+    return { quantidade: clientes.length, amostra: amostraClientes(clientes) };
+  },
+  async executar() {
+    const clientes = await buscarClientesComPdfSemSafra();
+    return apagarPdfsDeClientes(clientes);
+  },
+};
+
 // ---------------------------------------------------------------------------
 // clientes_por_tag -- apaga o CLIENTE INTEIRO (cascade já existente cuida de
 // envio_itens/tratativas/cliente_tags; conversas/pix_extracoes viram null em
@@ -220,15 +249,17 @@ const historicoMensagens = {
 export const CRITERIOS = {
   pdfs_por_safra: pdfsPorSafra,
   pdfs_por_tipo_fatura: pdfsPorTipoFatura,
+  pdfs_sem_safra: pdfsSemSafra,
   clientes_por_tag: clientesPorTag,
   historico_mensagens: historicoMensagens,
 };
 
 // ---------------------------------------------------------------------------
-// "O que mais está ocupando espaço" -- varre os 4 critérios com um filtro
+// "O que mais está ocupando espaço" -- varre os 5 critérios com um filtro
 // natural cada (uma linha por safra/tipo/tag/campanha que de fato tem algo
-// pra apagar) e devolve tudo numa lista só, ordenada por quantidade
-// decrescente. Puramente informativo -- nunca apaga nada.
+// pra apagar, + "sem safra" pros cadastros legados) e devolve tudo numa
+// lista só, ordenada por quantidade decrescente. Puramente informativo --
+// nunca apaga nada.
 // ---------------------------------------------------------------------------
 async function contarMensagensPorCampanha(campanha) {
   const { data: conversas, error } = await supabase.from('conversas').select('id').eq('campanha', campanha).limit(LIMITE_LINHAS);
@@ -252,9 +283,20 @@ export async function montarResumoExclusao() {
 
   const porSafra = new Map();
   const porTipo = new Map();
+  let semSafra = 0;
   for (const c of clientesComPdf || []) {
     if (c.safra) porSafra.set(c.safra, (porSafra.get(c.safra) || 0) + 1);
+    else semSafra += 1;
     if (c.tipo_fatura) porTipo.set(c.tipo_fatura, (porTipo.get(c.tipo_fatura) || 0) + 1);
+  }
+  if (semSafra > 0) {
+    itens.push({
+      criterio: 'pdfs_sem_safra',
+      filtro: {},
+      rotulo: 'PDFs — sem safra (cadastros antigos)',
+      quantidade: semSafra,
+      detalhe: `${semSafra} PDF(s) de antes do conceito de safra existir`,
+    });
   }
   for (const [safra, quantidade] of porSafra) {
     itens.push({

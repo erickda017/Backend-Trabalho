@@ -20,13 +20,28 @@ import { rotuloSafra } from './safras.js';
 // garante um teto alto o bastante pra não truncar em silêncio.
 const LIMITE_LINHAS = 50000;
 
+// [CRÍTICO -- bug real corrigido 2026-09] Antes esta função só logava o erro
+// e seguia a vida (mesmo "best-effort" que limpezaAutomatica.js usa) -- só
+// que quem chama SEMPRE limpava pdf_path do cliente logo em seguida, MESMO
+// quando a remoção do Storage falhava de verdade. Resultado: o arquivo
+// ficava órfão no bucket pra sempre (ninguém mais sabe o path dele, já que
+// a única referência acabou de ser apagada do banco) e o operador via
+// "sucesso" sem saber que o espaço em disco não foi liberado -- exatamente
+// o sintoma relatado (Storage size não caiu depois de apagar). Agora
+// devolve QUAIS caminhos falharam, e quem chama só limpa o ponteiro no
+// banco pros que realmente confirmaram remoção.
 async function removerDoStorageEmLotes(bucket, caminhos) {
   const TAMANHO_LOTE = 100; // limite prático da API do Supabase Storage por chamada de .remove()
+  const falharam = [];
   for (let i = 0; i < caminhos.length; i += TAMANHO_LOTE) {
     const lote = caminhos.slice(i, i + TAMANHO_LOTE);
     const { error } = await supabase.storage.from(bucket).remove(lote);
-    if (error) console.error(`[exclusao] erro ao remover arquivos do bucket ${bucket}:`, error.message);
+    if (error) {
+      console.error(`[exclusao] erro ao remover arquivos do bucket ${bucket}:`, error.message);
+      falharam.push(...lote);
+    }
   }
+  return falharam;
 }
 
 function amostraClientes(clientes) {
@@ -51,16 +66,31 @@ async function buscarClientesComPdf(coluna, valor) {
 
 async function apagarPdfsDeClientes(clientes) {
   if (!clientes.length) return 0;
-  await removerDoStorageEmLotes(BUCKET, clientes.map((c) => c.pdf_path).filter(Boolean));
+  const falharam = new Set(await removerDoStorageEmLotes(BUCKET, clientes.map((c) => c.pdf_path).filter(Boolean)));
+
+  // Só limpa pdf_path de quem CONFIRMADAMENTE teve o arquivo removido --
+  // cliente cujo arquivo falhou continua com o ponteiro intacto (aparece nas
+  // próximas execuções/preview em vez de virar um órfão inrrastreável no
+  // Storage).
+  const comSucesso = clientes.filter((c) => !falharam.has(c.pdf_path));
+  if (!comSucesso.length) {
+    console.error(`[exclusao] TODAS as ${clientes.length} remoções de Storage falharam -- nenhum pdf_path foi limpo.`);
+    return 0;
+  }
+
   const { error } = await supabase
     .from('clientes')
     .update({ pdf_url: null, pdf_path: null, pdf_atualizado_em: null })
     .in(
       'id',
-      clientes.map((c) => c.id),
+      comSucesso.map((c) => c.id),
     );
   if (error) throw error;
-  return clientes.length;
+
+  if (falharam.size) {
+    console.error(`[exclusao] ${falharam.size} de ${clientes.length} PDF(s) não foram removidos do Storage -- pdf_path preservado pra esses.`);
+  }
+  return comSucesso.length;
 }
 
 const pdfsPorSafra = {
@@ -172,8 +202,18 @@ const clientesPorTag = {
   async executar(filtro) {
     const clientes = await buscarClientesPorTagNome(filtro?.tag_nome);
     if (!clientes.length) return 0;
+    // [2026-09] Diferente de apagarPdfsDeClientes: aqui o CLIENTE inteiro é
+    // apagado de qualquer forma (é o propósito deste critério) -- uma falha
+    // isolada na limpeza do Storage não deveria bloquear a exclusão do
+    // cadastro. Ainda assim loga alto se sobrar arquivo órfão, pra não
+    // silenciar o mesmo tipo de sintoma relatado (Storage não diminuindo).
     const pdfPaths = clientes.map((c) => c.pdf_path).filter(Boolean);
-    if (pdfPaths.length) await removerDoStorageEmLotes(BUCKET, pdfPaths);
+    if (pdfPaths.length) {
+      const falharam = await removerDoStorageEmLotes(BUCKET, pdfPaths);
+      if (falharam.length) {
+        console.error(`[exclusao] ${falharam.length} PDF(s) ficaram órfãos no Storage (cliente foi apagado mesmo assim):`, falharam);
+      }
+    }
     const { error } = await supabase
       .from('clientes')
       .delete()
@@ -237,8 +277,16 @@ const historicoMensagens = {
       .limit(LIMITE_LINHAS);
     if (msgError) throw msgError;
 
+    // Conversas são apagadas de qualquer forma (é o propósito deste
+    // critério); falha isolada num anexo não bloqueia -- só loga alto pra
+    // não silenciar um órfão no bucket chat-midia.
     const caminhos = (mensagens || []).map((m) => m.anexo_path).filter(Boolean);
-    if (caminhos.length) await removerDoStorageEmLotes(CHAT_BUCKET, caminhos);
+    if (caminhos.length) {
+      const falharam = await removerDoStorageEmLotes(CHAT_BUCKET, caminhos);
+      if (falharam.length) {
+        console.error(`[exclusao] ${falharam.length} anexo(s) ficaram órfãos no Storage (conversa foi apagada mesmo assim):`, falharam);
+      }
+    }
 
     const { error } = await supabase.from('conversas').delete().in('id', ids);
     if (error) throw error;

@@ -23,6 +23,7 @@ import faturasRoutes from './routes/faturas.routes.js';
 import boletosRoutes from './routes/boletos.routes.js';
 import perfilRoutes from './routes/perfil.routes.js';
 import supervisorRoutes from './routes/supervisor.routes.js';
+import exclusaoRoutes from './routes/exclusao.routes.js';
 import arquivosRoutes from './routes/arquivos.routes.js';
 import faturasPendentesRoutes from './routes/faturasPendentes.routes.js';
 import safrasRoutes from './routes/safras.routes.js';
@@ -117,6 +118,11 @@ app.use('/api/faturas', requireAuth, faturasRoutes);
 // que já libera a origem do front (FRONTEND_ORIGIN).
 app.use('/api/boletos', requireAuth, boletosRoutes);
 app.use('/api/perfil', requireAuth, perfilRoutes);
+// [2026-09] Montada ANTES de /api/supervisor (mais específica primeiro) --
+// evita depender do fallthrough do Express caso supervisorRoutes um dia
+// ganhe uma rota catch-all que engoliria /supervisor/exclusao/* antes de
+// chegar aqui.
+app.use('/api/supervisor/exclusao', requireAuth, requireSupervisor, exclusaoRoutes);
 app.use('/api/supervisor', requireAuth, requireSupervisor, supervisorRoutes);
 // [2026-08] Proxy de arquivos (esconde a URL do Supabase Storage do
 // navegador -- ver comentário completo em routes/arquivos.routes.js).

@@ -7,7 +7,7 @@ import { escaparFiltroPostgrest } from '../lib/filtros.js';
 import { parseListaClientes, extrairNomesEContratosDeListaCrua } from '../lib/parseListaClientes.js';
 import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
 import { propagarDadosFatura, vincularNumero, desvincularNumero, membrosDoGrupo } from '../lib/faturaPropagacao.js';
-import { casarCliente, normalizarTexto } from '../lib/nomeMatch.js';
+import { casarParesComClientes, normalizarTexto } from '../lib/nomeMatch.js';
 import { cancelarItensPendentesDosClientes } from '../lib/tagsEfeito.js';
 import { sugerirPromocoesSpd, proximaDataMesmoDia } from '../lib/promocaoSpd.js';
 import { associarPendentesAoCliente } from '../lib/faturasPendentes.js';
@@ -238,31 +238,13 @@ router.post('/importar-pagos', limiteSensivel, async (req, res) => {
   }
   if (!tag) return res.status(500).json({ error: 'Não foi possível localizar/criar a tag "Pago"' });
 
-  const encontrados = [];
-  const naoEncontrados = [];
   // [2026-09] Nome colado bate com 2+ clientes cadastrados e não havia
   // contrato no texto pra desempatar -- não adivinha (marcar o errado como
   // pago é pior que deixar de fora pra revisão manual). Separado de
-  // `naoEncontrados` pra UI poder orientar o operador a colar com o
+  // `nao_encontrados` pra UI poder orientar o operador a colar com o
   // contrato, em vez de só "nome não encontrado" (que sugeriria cadastrar de
   // novo, quando na real o cliente já existe, só que em duplicata de nome).
-  const ambiguos = [];
-  const jaMarcadosVistos = new Set();
-
-  for (const par of pares) {
-    const resultado = casarCliente({ nome: par.nome, numeroContrato: par.numero_contrato, clientes: clientes || [] });
-    if (resultado.status === 'ambiguo') {
-      ambiguos.push({ nome_colado: par.nome, candidatos: resultado.candidatos.length });
-      continue;
-    }
-    const clienteCasado = resultado.cliente;
-    if (!clienteCasado || jaMarcadosVistos.has(clienteCasado.id)) {
-      if (!clienteCasado) naoEncontrados.push(par.nome);
-      continue;
-    }
-    jaMarcadosVistos.add(clienteCasado.id);
-    encontrados.push({ nome_colado: par.nome, cliente_id: clienteCasado.id, cliente_nome: clienteCasado.nome });
-  }
+  const { encontrados, naoEncontrados, ambiguos } = casarParesComClientes(pares, clientes);
 
   if (encontrados.length) {
     const linhas = encontrados.map((e) => ({ cliente_id: e.cliente_id, tag_id: tag.id }));
@@ -286,6 +268,60 @@ router.post('/importar-pagos', limiteSensivel, async (req, res) => {
     nao_encontrados: naoEncontrados,
     ambiguos,
     sugestoes_spd: sugestoesSpd,
+  });
+});
+
+// [2026-09] IDENTIFICAR LISTA CRUA PRA DISPARO -- mesma lista crua colada de
+// sempre (NOME/contrato/CPF/telefone(s)/Fatura/valor, ver
+// lib/parseListaClientes.js), mas aqui só IDENTIFICA quem já está cadastrado
+// -- NENHUM efeito colateral (não aplica tag, não cancela item pendente, não
+// sugere promoção de safra -- isso é o que diferencia de /importar-pagos,
+// que tem a mesma extração+casamento só que serve pra marcar como "Pago").
+// O objetivo é montar rapidamente um grupo de disparo a partir de uma lista
+// (ex.: relatório de inadimplência colado) sem precisar caçar cliente por
+// cliente na tela de Clientes -- o front usa `encontrados[].cliente_id` pra
+// pré-selecionar os destinatários na aba Disparo (ver EtapaDestinatarios em
+// disparos.tsx), e o operador segue o fluxo normal (mensagem/variações/
+// agendamento) a partir daí.
+router.post('/identificar-lista', limiteSensivel, async (req, res) => {
+  const { texto } = req.body || {};
+  if (!texto || typeof texto !== 'string' || !texto.trim()) {
+    return res.status(400).json({ error: 'Cole a lista de clientes no campo "texto"' });
+  }
+  const usuarioId = req.user.id;
+
+  const paresColados = extrairNomesEContratosDeListaCrua(texto);
+  const vistosDedup = new Set();
+  const pares = paresColados.filter((p) => {
+    const chave = `${p.nome} ${p.numero_contrato ?? ''}`;
+    if (vistosDedup.has(chave)) return false;
+    vistosDedup.add(chave);
+    return true;
+  });
+  if (!pares.length) return res.status(400).json({ error: 'Nenhum nome encontrado no texto colado' });
+  if (pares.length > 2000) return res.status(400).json({ error: 'Máximo de 2000 nomes por identificação' });
+
+  // [2026-09] Escopado a campanha='cobranca' -- é a carteira que a aba
+  // Disparo usa (ver useAppState/clientesPaginados.ts, sem filtro explícito
+  // de campanha = 'cobranca'). Sem esse filtro, um cliente de Ativação Chip
+  // podia "casar" aqui e depois sumir silenciosamente da pré-seleção (o
+  // front não tem esse cliente carregado) ou, pior, ser ignorado na hora de
+  // criar o envio (campanha do envio não bate com a do cliente, ver
+  // resolverClienteIds em routes/envios.routes.js).
+  const { data: clientes, error: clientesError } = await supabase
+    .from('clientes')
+    .select('id, nome, numero_contrato, telefone')
+    .eq('usuario_id', usuarioId)
+    .eq('campanha', 'cobranca');
+  if (clientesError) return res.status(500).json({ error: clientesError.message });
+
+  const { encontrados, naoEncontrados, ambiguos } = casarParesComClientes(pares, clientes);
+
+  res.json({
+    total_colados: pares.length,
+    encontrados,
+    nao_encontrados: naoEncontrados,
+    ambiguos,
   });
 });
 

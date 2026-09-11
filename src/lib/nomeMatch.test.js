@@ -6,7 +6,7 @@
 // sistema.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { casarCliente, encontrarClientesPorNome, normalizarTexto } from './nomeMatch.js';
+import { casarCliente, casarParesComClientes, encontrarClientesPorNome, normalizarTexto } from './nomeMatch.js';
 
 const clientesBase = [
   { id: 'a', nome: 'JOAO DA SILVA', numero_contrato: '111111' },
@@ -67,4 +67,37 @@ test('encontrarClientesPorNome: exato tem prioridade sobre parcial', () => {
 
 test('normalizarTexto remove acento e caixa', () => {
   assert.equal(normalizarTexto('José Ávila'), 'jose avila');
+});
+
+// [2026-09] casarParesComClientes -- usada tanto por /importar-pagos quanto
+// por /identificar-lista (grupo de disparo por lista colada).
+test('casarParesComClientes: separa encontrados/ambiguos/nao_encontrados e nunca duplica o mesmo cliente', () => {
+  const clientes = [
+    { id: 'a', nome: 'JOAO DA SILVA', numero_contrato: '111111', telefone: '5511911111111' },
+    { id: 'b', nome: 'JOAO DA SILVA', numero_contrato: '222222', telefone: '5511922222222' },
+    { id: 'c', nome: 'MARIA OLIVEIRA', numero_contrato: '333333', telefone: '5511933333333' },
+  ];
+  const pares = [
+    { nome: 'JOAO DA SILVA', numero_contrato: '222222' }, // resolve por contrato -> b
+    { nome: 'JOAO DA SILVA', numero_contrato: '222222' }, // repetido -- não deve duplicar
+    { nome: 'JOAO DA SILVA', numero_contrato: null }, // sem contrato -- ambíguo (a ou b)
+    { nome: 'MARIA OLIVEIRA', numero_contrato: null }, // único -- resolve por nome
+    { nome: 'NINGUEM AQUI', numero_contrato: null }, // não encontrado
+  ];
+
+  const { encontrados, ambiguos, naoEncontrados } = casarParesComClientes(pares, clientes);
+
+  assert.deepEqual(
+    encontrados.map((e) => e.cliente_id).sort(),
+    ['b', 'c'],
+  );
+  assert.equal(encontrados.find((e) => e.cliente_id === 'b').cliente_telefone, '5511922222222');
+  assert.equal(ambiguos.length, 1);
+  assert.equal(ambiguos[0].nome_colado, 'JOAO DA SILVA');
+  assert.deepEqual(naoEncontrados, ['NINGUEM AQUI']);
+});
+
+test('casarParesComClientes: lista vazia de pares devolve tudo vazio', () => {
+  const r = casarParesComClientes([], [{ id: 'a', nome: 'JOAO' }]);
+  assert.deepEqual(r, { encontrados: [], naoEncontrados: [], ambiguos: [] });
 });

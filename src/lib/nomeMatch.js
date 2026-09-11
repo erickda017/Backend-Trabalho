@@ -104,3 +104,42 @@ export function casarClientePorNome(nome, clientes) {
 export function casarClientePorArquivo(nomeArquivo, clientes) {
   return casarCliente({ arquivo: nomeArquivo, clientes }).cliente;
 }
+
+// [2026-09] Loop de "casar vários pares nome/contrato colados contra a base
+// de clientes" -- extraído de POST /importar-pagos (routes/clientes.routes.js)
+// pra ser reusado também em POST /identificar-lista, que monta um grupo de
+// disparo a partir da mesma lista crua colada, em vez de marcar como "Pago".
+// Mesmo critério de sempre (ver `casarCliente`): contrato desempata nome
+// duplicado, nome sozinho só resolve se for inequívoco. Nunca deixa o mesmo
+// cliente entrar duas vezes em `encontrados`, mesmo que apareça mais de uma
+// vez no texto colado (ex.: 2 telefones do mesmo cliente em linhas
+// diferentes).
+export function casarParesComClientes(pares, clientes) {
+  const lista = clientes || [];
+  const encontrados = [];
+  const naoEncontrados = [];
+  const ambiguos = [];
+  const jaVistos = new Set();
+
+  for (const par of pares) {
+    const resultado = casarCliente({ nome: par.nome, numeroContrato: par.numero_contrato, clientes: lista });
+    if (resultado.status === 'ambiguo') {
+      ambiguos.push({ nome_colado: par.nome, candidatos: resultado.candidatos.length });
+      continue;
+    }
+    const clienteCasado = resultado.cliente;
+    if (!clienteCasado || jaVistos.has(clienteCasado.id)) {
+      if (!clienteCasado) naoEncontrados.push(par.nome);
+      continue;
+    }
+    jaVistos.add(clienteCasado.id);
+    encontrados.push({
+      nome_colado: par.nome,
+      cliente_id: clienteCasado.id,
+      cliente_nome: clienteCasado.nome,
+      cliente_telefone: clienteCasado.telefone,
+    });
+  }
+
+  return { encontrados, naoEncontrados, ambiguos };
+}

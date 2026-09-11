@@ -1,5 +1,5 @@
-import { supabase, BUCKET, gerarSignedUrl } from '../lib/supabase.js';
-import { enviarMensagemComPdf, enviarMensagemTexto, validarNumero, isConnectedQualquerSlot, escolherSlotParaEnvio } from './whatsapp.js';
+import { supabase, BUCKET, CHAT_BUCKET, gerarSignedUrl } from '../lib/supabase.js';
+import { enviarMensagemComPdf, enviarMensagemComAnexo, enviarMensagemTexto, validarNumero, isConnectedQualquerSlot, escolherSlotParaEnvio } from './whatsapp.js';
 import { dispararWebhook } from './webhook.js';
 import { registrarMensagemSaida } from './chatIngest.js';
 
@@ -180,22 +180,48 @@ async function enviarItem(item, envio, usuarioId) {
       return;
     }
 
+    // [2026-09] FOTO DO LOTE (ver migration-26-disparo-foto.sql): imagem
+    // única, escolhida na hora de montar o envio inteiro (não por cliente,
+    // diferente do PDF abaixo) -- essencial pra Ativação Chip, onde o
+    // cliente nunca tem PDF cadastrado. Quando o lote tem foto, ela tem
+    // PRIORIDADE sobre o PDF do cliente (o WhatsApp só aceita 1 anexo por
+    // mensagem, e o operador escolheu a foto de propósito pra esse lote).
+    // `envio.enviar_pix` continua forçando texto puro, igual já fazia com o
+    // PDF -- o modo "só Pix" não deve sair com anexo nenhum.
+    const fotoUrlAssinada = !envio.enviar_pix && envio.foto_path ? await gerarSignedUrl(CHAT_BUCKET, envio.foto_path) : null;
+
     // Bucket privado: assina uma URL só pro Baileys baixar AGORA (curta
     // duração) -- nunca reaproveita/persiste uma URL pública fixa.
     // `envio.enviar_pix` força texto puro mesmo com PDF cadastrado.
-    const pdfUrlAssinada = !envio.enviar_pix && cliente.pdf_path ? await gerarSignedUrl(BUCKET, cliente.pdf_path) : null;
+    const pdfUrlAssinada =
+      !fotoUrlAssinada && !envio.enviar_pix && cliente.pdf_path ? await gerarSignedUrl(BUCKET, cliente.pdf_path) : null;
 
-    const { messageId } = pdfUrlAssinada
-      ? await enviarMensagemComPdf({
-          numero: telefoneUsado,
-          jid,
-          mensagem,
-          pdfUrl: pdfUrlAssinada,
-          pdfNome: `fatura-${cliente.nome}.pdf`,
-          usuarioId,
-          slot,
-        })
-      : await enviarMensagemTexto({ numero: telefoneUsado, jid, mensagem, usuarioId, slot });
+    let messageId;
+    if (fotoUrlAssinada) {
+      ({ messageId } = await enviarMensagemComAnexo({
+        numero: telefoneUsado,
+        jid,
+        mensagem,
+        anexoUrl: fotoUrlAssinada,
+        anexoNome: envio.foto_nome || 'foto.jpg',
+        anexoTipo: 'imagem',
+        anexoMimetype: envio.foto_mimetype || 'image/jpeg',
+        usuarioId,
+        slot,
+      }));
+    } else if (pdfUrlAssinada) {
+      ({ messageId } = await enviarMensagemComPdf({
+        numero: telefoneUsado,
+        jid,
+        mensagem,
+        pdfUrl: pdfUrlAssinada,
+        pdfNome: `fatura-${cliente.nome}.pdf`,
+        usuarioId,
+        slot,
+      }));
+    } else {
+      ({ messageId } = await enviarMensagemTexto({ numero: telefoneUsado, jid, mensagem, usuarioId, slot }));
+    }
 
     // A partir daqui a mensagem JÁ FOI enviada de verdade pelo WhatsApp --
     // ver comentário em atualizarStatusEnviado sobre por que essa gravação
@@ -226,9 +252,9 @@ async function enviarItem(item, envio, usuarioId) {
       await registrarMensagemSaida({
         telefone: telefoneUsado,
         texto: mensagem,
-        tipo: pdfUrlAssinada ? 'documento' : 'texto',
-        anexoPath: pdfUrlAssinada ? cliente.pdf_path : null,
-        anexoNome: pdfUrlAssinada ? `fatura-${cliente.nome}.pdf` : null,
+        tipo: fotoUrlAssinada ? 'imagem' : pdfUrlAssinada ? 'documento' : 'texto',
+        anexoPath: fotoUrlAssinada ? envio.foto_path : pdfUrlAssinada ? cliente.pdf_path : null,
+        anexoNome: fotoUrlAssinada ? envio.foto_nome || 'foto.jpg' : pdfUrlAssinada ? `fatura-${cliente.nome}.pdf` : null,
         messageId,
         usuarioId,
         campanha: envio.campanha || 'cobranca',

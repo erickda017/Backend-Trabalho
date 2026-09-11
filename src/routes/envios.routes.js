@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { supabase, BUCKET, gerarSignedUrl } from '../lib/supabase.js';
+import multer from 'multer';
+import { supabase, BUCKET, CHAT_BUCKET, gerarSignedUrl, urlProxyArquivo } from '../lib/supabase.js';
 import { lerPaginacao } from '../lib/paginacao.js';
 import { responderExportacao } from '../lib/exportar.js';
 import {
@@ -21,8 +22,28 @@ import { escaparFiltroPostgrest } from '../lib/filtros.js';
 import { STATUS_BLOQUEIA_DISPARO } from '../lib/statusOperador.js';
 import { agregarContadores } from '../lib/agregarContadores.js';
 import { limiteSensivel } from '../lib/rateLimit.js';
+import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
+import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 
 const router = Router();
+
+// [2026-09] Upload da FOTO de um lote (ver migration-26-disparo-foto.sql e
+// POST /anexo-foto abaixo) -- só imagem, tamanho de foto de celular, nunca
+// PDF/planilha (essas rotas já existem em outros lugares).
+const uploadFoto = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('Envie um arquivo de imagem (jpg, png, etc.)'));
+    }
+    cb(null, true);
+  },
+});
+const uploadFotoComTratamentoDeErro = comTratamentoDeErroUpload(uploadFoto.single('foto'), {
+  limiteMb: 10,
+  logPrefixo: '[envios]',
+});
 
 // [2026-08] MULTI-TENANT: toda rota abaixo é escopada por req.user.id (o
 // operador autenticado, preenchido pelo requireAuth em server.js). Não existe
@@ -37,6 +58,11 @@ function montarEnvioResumo(envio, contadores) {
     status: envio.status,
     janela_ms: envio.janela_ms ?? null,
     enviar_pix: envio.enviar_pix ?? false,
+    // [2026-09] Foto anexada ao lote inteiro (ver migration-26) -- path do
+    // proxy (nunca a signed URL crua), mesmo padrão de pdf_url/anexo_url no
+    // resto do sistema. null quando o lote não tem foto.
+    foto_url: urlProxyArquivo('chat-midia', envio.foto_path || null),
+    foto_nome: envio.foto_nome || null,
     ...contadores,
   };
 }
@@ -186,12 +212,69 @@ router.post('/teste', limiteSensivel, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Upload da FOTO que vai anexada em TODAS as mensagens de um lote (ver
+// migration-26-disparo-foto.sql) -- pensado pra Ativação Chip, onde o
+// cliente nunca tem PDF/fatura cadastrado, mas o operador quer mandar uma
+// imagem (print de instrução, propaganda etc) junto do texto pro lote
+// inteiro em vez de anexo por cliente. A tela monta o lote localmente ANTES
+// de criar o envio (ver EtapaFoto no front, routes/disparos.tsx) -- por isso
+// esta rota não leva :id, só sobe o arquivo e devolve o path pra POST /
+// (abaixo) gravar no envio novo assim que ele for criado.
+router.post('/anexo-foto', limiteSensivel, uploadFotoComTratamentoDeErro, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'arquivo da foto não enviado (campo "foto")' });
+  const usuarioId = req.user.id;
+
+  // Prefixado com usuarioId (mesma convenção de chat.routes.js/CHAT_BUCKET)
+  // -- garante que o dono do arquivo é sempre quem fez upload, e é o que
+  // POST / valida abaixo antes de aceitar um foto_path vindo do corpo.
+  const caminho = `${usuarioId}/disparo/${Date.now()}-${nomeArquivoSeguro(req.file.originalname, 'foto.jpg')}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from(CHAT_BUCKET)
+    .upload(caminho, req.file.buffer, { contentType: req.file.mimetype, upsert: true });
+  if (uploadError) return res.status(500).json({ error: uploadError.message });
+
+  res.status(201).json({
+    foto_path: caminho,
+    foto_mimetype: req.file.mimetype,
+    foto_nome: req.file.originalname,
+    foto_url: urlProxyArquivo('chat-midia', caminho),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Cria um novo envio (lote de disparo)
-// body: { mensagem, mensagens, cliente_ids[], tag_ids[], intervalo_ms, janela_ms, agendado_para?, enviar_pix?, livre? }
+// body: { mensagem, mensagens, cliente_ids[], tag_ids[], intervalo_ms, janela_ms, agendado_para?, enviar_pix?, livre?, foto_path?, foto_mimetype?, foto_nome? }
 // ---------------------------------------------------------------------------
 router.post('/', limiteSensivel, async (req, res) => {
   const usuarioId = req.user.id;
-  const { mensagem, mensagens, cliente_ids = [], tag_ids = [], intervalo_ms, janela_ms, agendado_para, enviar_pix, livre, campanha } = req.body || {};
+  const {
+    mensagem,
+    mensagens,
+    cliente_ids = [],
+    tag_ids = [],
+    intervalo_ms,
+    janela_ms,
+    agendado_para,
+    enviar_pix,
+    livre,
+    campanha,
+    foto_path,
+    foto_mimetype,
+    foto_nome,
+  } = req.body || {};
+
+  // [2026-09] Foto do lote (ver POST /anexo-foto acima e migration-26): só
+  // aceita um path que comece com o próprio usuarioId -- é a convenção que
+  // a rota de upload sempre usa, então um foto_path de outro formato (ou de
+  // outro operador colado no corpo por engano/má-fé) nunca é aceito aqui.
+  let fotoPathValidado = null;
+  if (foto_path !== undefined && foto_path !== null) {
+    if (typeof foto_path !== 'string' || !foto_path.startsWith(`${usuarioId}/`)) {
+      return res.status(400).json({ error: 'foto_path inválido' });
+    }
+    fotoPathValidado = foto_path;
+  }
   // [2026-09] ATIVAÇÃO CHIP: qual carteira este lote dispara pra -- default
   // 'cobranca' (comportamento de sempre, a tela de Disparos normal nunca
   // manda esse campo). Ver migration-25-ativacao-chip.sql.
@@ -250,6 +333,9 @@ router.post('/', limiteSensivel, async (req, res) => {
       janela_ms: janela_ms || null,
       enviar_pix: enviarPix,
       campanha: campanhaDoEnvio,
+      foto_path: fotoPathValidado,
+      foto_mimetype: fotoPathValidado ? foto_mimetype || null : null,
+      foto_nome: fotoPathValidado ? foto_nome || null : null,
     })
     .select()
     .single();

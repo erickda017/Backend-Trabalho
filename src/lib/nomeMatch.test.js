@@ -101,3 +101,52 @@ test('casarParesComClientes: lista vazia de pares devolve tudo vazio', () => {
   const r = casarParesComClientes([], [{ id: 'a', nome: 'JOAO' }]);
   assert.deepEqual(r, { encontrados: [], naoEncontrados: [], ambiguos: [] });
 });
+
+// [2026-09] incluirTodosOsAmbiguos -- usado por /identificar-lista (grupo de
+// disparo): pedido explícito do operador pra não deixar nome ambíguo de
+// fora, manda pra todos os candidatos em vez de exigir contrato.
+test('casarParesComClientes: incluirTodosOsAmbiguos manda pra todos os candidatos do nome ambíguo', () => {
+  const clientes = [
+    { id: 'a', nome: 'JOAO DA SILVA', numero_contrato: '111111', telefone: '5511911111111' },
+    { id: 'b', nome: 'JOAO DA SILVA', numero_contrato: '222222', telefone: '5511922222222' },
+    { id: 'c', nome: 'MARIA OLIVEIRA', numero_contrato: '333333', telefone: '5511933333333' },
+  ];
+  const pares = [
+    { nome: 'JOAO DA SILVA', numero_contrato: null }, // ambíguo -- a e b
+    { nome: 'MARIA OLIVEIRA', numero_contrato: null }, // único
+  ];
+
+  const { encontrados, ambiguos, naoEncontrados } = casarParesComClientes(pares, clientes, {
+    incluirTodosOsAmbiguos: true,
+  });
+
+  assert.deepEqual(
+    encontrados.map((e) => e.cliente_id).sort(),
+    ['a', 'b', 'c'],
+  );
+  assert.ok(encontrados.find((e) => e.cliente_id === 'a').ambiguo);
+  assert.ok(encontrados.find((e) => e.cliente_id === 'b').ambiguo);
+  assert.ok(!encontrados.find((e) => e.cliente_id === 'c').ambiguo);
+  // `ambiguos` continua preenchido -- agora é só resumo informativo, não
+  // mais uma exclusão (os candidatos já estão em `encontrados` acima).
+  assert.equal(ambiguos.length, 1);
+  assert.equal(ambiguos[0].nome_colado, 'JOAO DA SILVA');
+  assert.deepEqual(naoEncontrados, []);
+});
+
+test('casarParesComClientes: incluirTodosOsAmbiguos não duplica candidato repetido em nomes ambíguos diferentes', () => {
+  const clientes = [
+    { id: 'a', nome: 'JOAO DA SILVA', telefone: '5511911111111' },
+    { id: 'b', nome: 'JOAO DA SILVA', telefone: '5511922222222' },
+  ];
+  const pares = [
+    { nome: 'JOAO DA SILVA', numero_contrato: null },
+    { nome: 'JOAO DA SILVA', numero_contrato: null }, // repetido no texto colado
+  ];
+
+  const { encontrados } = casarParesComClientes(pares, clientes, { incluirTodosOsAmbiguos: true });
+  assert.deepEqual(
+    encontrados.map((e) => e.cliente_id).sort(),
+    ['a', 'b'],
+  );
+});

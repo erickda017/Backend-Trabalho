@@ -315,7 +315,14 @@ router.post('/identificar-lista', limiteSensivel, async (req, res) => {
     .eq('campanha', 'cobranca');
   if (clientesError) return res.status(500).json({ error: clientesError.message });
 
-  const { encontrados, naoEncontrados, ambiguos } = casarParesComClientes(pares, clientes);
+  // [2026-09] `incluirTodosOsAmbiguos: true` -- diferente de /importar-pagos
+  // (nunca adivinha, marcar o cliente errado como pago é caro), aqui é
+  // grupo de DISPARO: pedido explícito do operador pra não deixar nome
+  // ambíguo de fora, manda pra todos os candidatos daquele nome em vez de
+  // exigir contrato pra desempatar.
+  const { encontrados, naoEncontrados, ambiguos } = casarParesComClientes(pares, clientes, {
+    incluirTodosOsAmbiguos: true,
+  });
 
   res.json({
     total_colados: pares.length,

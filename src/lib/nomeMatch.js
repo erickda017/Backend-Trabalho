@@ -114,7 +114,19 @@ export function casarClientePorArquivo(nomeArquivo, clientes) {
 // cliente entrar duas vezes em `encontrados`, mesmo que apareça mais de uma
 // vez no texto colado (ex.: 2 telefones do mesmo cliente em linhas
 // diferentes).
-export function casarParesComClientes(pares, clientes) {
+//
+// `incluirTodosOsAmbiguos` (default false, comportamento de sempre): quando
+// um nome bate com 2+ clientes e não há contrato pra desempatar, o padrão é
+// NUNCA adivinhar (marcar o cliente errado como pago é o pior caso de
+// /importar-pagos). Mas em /identificar-lista (monta grupo de DISPARO, não
+// marca nada como pago) o operador pode preferir o oposto: mandar a mesma
+// mensagem pra TODOS os candidatos do nome ambíguo em vez de deixar de fora
+// -- errar o alvo de uma mensagem de cobrança é bem mais barato que errar
+// quem foi marcado como pago. Com a flag ligada, cada candidato ambíguo
+// entra em `encontrados` normalmente (marcado com `ambiguo: true`), e some
+// de `ambiguos` (que passa a ser só o resumo informativo de quais nomes
+// geraram múltiplos candidatos, não mais uma exclusão).
+export function casarParesComClientes(pares, clientes, { incluirTodosOsAmbiguos = false } = {}) {
   const lista = clientes || [];
   const encontrados = [];
   const naoEncontrados = [];
@@ -125,6 +137,19 @@ export function casarParesComClientes(pares, clientes) {
     const resultado = casarCliente({ nome: par.nome, numeroContrato: par.numero_contrato, clientes: lista });
     if (resultado.status === 'ambiguo') {
       ambiguos.push({ nome_colado: par.nome, candidatos: resultado.candidatos.length });
+      if (incluirTodosOsAmbiguos) {
+        for (const candidato of resultado.candidatos) {
+          if (jaVistos.has(candidato.id)) continue;
+          jaVistos.add(candidato.id);
+          encontrados.push({
+            nome_colado: par.nome,
+            cliente_id: candidato.id,
+            cliente_nome: candidato.nome,
+            cliente_telefone: candidato.telefone,
+            ambiguo: true,
+          });
+        }
+      }
       continue;
     }
     const clienteCasado = resultado.cliente;

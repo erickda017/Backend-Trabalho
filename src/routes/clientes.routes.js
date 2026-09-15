@@ -350,7 +350,7 @@ router.get('/verificar-vencimentos/status', (req, res) => {
 });
 
 router.get('/', async (req, res) => {
-  const { busca, tag, com_pix, sem_pix, com_pdf, sem_pdf, recebeu_disparo, safra, tipo_fatura } = req.query;
+  const { busca, tag, com_pix, sem_pix, com_pdf, sem_pdf, recebeu_disparo, safra, tipo_fatura, cadastrado_de, cadastrado_ate } = req.query;
   const { from, to } = lerPaginacao(req.query, { perPageDefault: 1000, perPageMax: 5000 });
   // [2026-09] ATIVAÇÃO CHIP: campanha separa as duas carteiras (ver
   // migration-25-ativacao-chip.sql) -- sem filtro explícito, sempre
@@ -380,6 +380,23 @@ router.get('/', async (req, res) => {
   // pela tela /safras pra listar quem compõe uma safra específica.
   if (safra) query = query.eq('safra', safra);
   if (tipo_fatura === 'FPD' || tipo_fatura === 'SPD') query = query.eq('tipo_fatura', tipo_fatura);
+
+  // [2026-09] Filtro por DATA DE CADASTRO (`created_at`, timestamptz) --
+  // usado pela Ativação Chip (lista paginada no servidor, ver
+  // routes/ativacao-chip.index.tsx no front). A tela de Clientes normal
+  // (cobrança) carrega a carteira inteira e filtra em memória, então não
+  // precisa passar isso aqui -- mas o filtro é genérico, funciona pras duas
+  // campanhas. `cadastrado_de`/`cadastrado_ate` vêm sempre "YYYY-MM-DD" (de
+  // um `<input type="date">`); Brasil não observa horário de verão desde
+  // 2019 (mesma premissa fixa de -03:00 usada em dispatchQueue.js), então dá
+  // pra montar o início/fim do dia nesse fuso direto, sem depender de Intl.
+  const REGEX_DATA_ISO = /^\d{4}-\d{2}-\d{2}$/;
+  if (cadastrado_de && REGEX_DATA_ISO.test(cadastrado_de)) {
+    query = query.gte('created_at', `${cadastrado_de}T00:00:00-03:00`);
+  }
+  if (cadastrado_ate && REGEX_DATA_ISO.test(cadastrado_ate)) {
+    query = query.lte('created_at', `${cadastrado_ate}T23:59:59.999-03:00`);
+  }
 
   let clienteIdsPorTag = null;
   if (tag) {

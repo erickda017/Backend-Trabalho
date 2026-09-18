@@ -104,6 +104,19 @@ function montarEnvioResumo(envio, contadores) {
 // migration-25-ativacao-chip.sql). Cliente de chip não tem PDF/Pix (esses
 // conceitos não existem nessa campanha) -- elegibilidade é sempre "livre"
 // pra ele, ignorando `modoElegibilidade` por completo.
+// [2026-09] Cada cliente ineligível vira { id, nome, telefone, motivo } --
+// antes só o COUNT (`semPdf`/`bloqueadosPorTag`) voltava pro front, que só
+// conseguia avisar "3 sem PDF vinculado", sem dizer quem. Pedido do operador:
+// "não fica barrando o disparo, mas me lista quem não tem fatura pra eu
+// verificar depois" -- o disparo já não é bloqueado (só quando NENHUM
+// cliente sobra elegível, ver `if (!comPdf.length)`/`if (!clienteIdsFinal.
+// length)` abaixo e em POST / logo depois desta função), mas sem o detalhe
+// por nome o operador não tinha como saber QUEM ficou de fora sem ir conferir
+// cliente por cliente na mão.
+function detalheDe(clientes, motivo) {
+  return clientes.map((c) => ({ id: c.id, nome: c.nome, telefone: c.telefone, motivo }));
+}
+
 async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, modoElegibilidade = 'pdf', campanha = 'cobranca') {
   const conjunto = new Set(clienteIds);
 
@@ -116,13 +129,13 @@ async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, modoE
     for (const row of data || []) conjunto.add(row.cliente_id);
   }
 
-  if (!conjunto.size) return { clienteIds: [], semPdf: 0, bloqueadosPorTag: 0 };
+  if (!conjunto.size) return { clienteIds: [], semPdf: 0, semPdfDetalhe: [], bloqueadosPorTag: 0, bloqueadosPorTagDetalhe: [] };
 
   // Dono real -- fecha a brecha de um cliente_id "emprestado" de outro
   // usuário (ou de outra campanha) ter sido colado no body da requisição.
   const { data: donos, error: donosError } = await supabase
     .from('clientes')
-    .select('id, pdf_path, pix_code, status_operador')
+    .select('id, nome, telefone, pdf_path, pix_code, status_operador')
     .in('id', [...conjunto])
     .eq('usuario_id', usuarioId)
     .eq('campanha', campanha);
@@ -133,9 +146,12 @@ async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, modoE
     if (campanha === 'chip_ativacao' || modoElegibilidade === 'livre') return true;
     return modoElegibilidade === 'pix' ? Boolean(c.pix_code) : Boolean(c.pdf_path);
   };
-  const semPdf = candidatos.filter((c) => !elegivel(c)).length;
+  const motivoSemPdf = modoElegibilidade === 'pix' ? 'sem_pix' : 'sem_pdf';
+  const inelegiveis = candidatos.filter((c) => !elegivel(c));
+  const semPdf = inelegiveis.length;
+  const semPdfDetalhe = detalheDe(inelegiveis, motivoSemPdf);
   const comPdf = candidatos.filter(elegivel);
-  if (!comPdf.length) return { clienteIds: [], semPdf, bloqueadosPorTag: 0 };
+  if (!comPdf.length) return { clienteIds: [], semPdf, semPdfDetalhe, bloqueadosPorTag: 0, bloqueadosPorTagDetalhe: [] };
 
   // Tags `permite_disparo: false` que qualquer um desses clientes tenha.
   const { data: tagsBloqueando, error: tagsError } = await supabase
@@ -150,8 +166,15 @@ async function resolverClienteIds(clienteIds = [], tagIds = [], usuarioId, modoE
     if (c.status_operador && STATUS_BLOQUEIA_DISPARO.has(c.status_operador)) bloqueados.add(c.id);
   }
   const liberados = comPdf.filter((c) => !bloqueados.has(c.id));
+  const bloqueadosPorTagDetalhe = detalheDe(comPdf.filter((c) => bloqueados.has(c.id)), 'tag_ou_status');
 
-  return { clienteIds: liberados.map((c) => c.id), semPdf, bloqueadosPorTag: bloqueados.size };
+  return {
+    clienteIds: liberados.map((c) => c.id),
+    semPdf,
+    semPdfDetalhe,
+    bloqueadosPorTag: bloqueados.size,
+    bloqueadosPorTagDetalhe,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -311,14 +334,21 @@ router.post('/', limiteSensivel, async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 
-  const { clienteIds: clienteIdsFinal, semPdf, bloqueadosPorTag } = resolucao;
+  const { clienteIds: clienteIdsFinal, semPdf, semPdfDetalhe, bloqueadosPorTag, bloqueadosPorTagDetalhe } = resolucao;
 
   if (!clienteIdsFinal.length) {
     const motivos = [];
     if (semPdf) motivos.push(enviarPix ? `${semPdf} sem PIX cadastrado` : `${semPdf} sem PDF vinculado`);
     if (bloqueadosPorTag) motivos.push(`${bloqueadosPorTag} com tag ou status que bloqueia disparo (ex.: Pago/Cancelado/Fraude)`);
     const detalhe = motivos.length ? ` (${motivos.join(', ')})` : '';
-    return res.status(400).json({ error: `nenhum cliente elegível pra disparo${detalhe}` });
+    // [2026-09] Mesmo aqui (ninguém sobrou elegível) devolve o detalhe -- o
+    // front usa pra listar quem ficou de fora por nome, em vez de só mostrar
+    // o erro genérico sem dizer quem precisa de fatura/Pix.
+    return res.status(400).json({
+      error: `nenhum cliente elegível pra disparo${detalhe}`,
+      ignorados_sem_pdf_detalhe: semPdfDetalhe,
+      ignorados_por_tag_detalhe: bloqueadosPorTagDetalhe,
+    });
   }
 
   const { data: envio, error: envioError } = await supabase
@@ -353,9 +383,16 @@ router.post('/', limiteSensivel, async (req, res) => {
 
   res.status(201).json({
     ...montarEnvioResumo(envio, { total: itens.length, enviados: 0, entregues: 0, lidos: 0, falhas: 0, numeros_invalidos: 0, pendentes: itens.length, cancelados: 0 }),
-    // Info só pra UI avisar "N clientes ficaram de fora" -- não afeta o lote em si.
+    // Info só pra UI avisar "N clientes ficaram de fora" -- não afeta o lote em si
+    // (o disparo segue normalmente pros clienteIdsFinal, ver acima -- nunca é
+    // bloqueado por causa de quem ficou fora, só quando NINGUÉM sobra elegível).
+    // `*_detalhe` traz nome/telefone de cada um, pra UI listar quem verificar
+    // depois em vez de só um número solto (ver ColarListaDialog/EtapaDestinatarios
+    // em disparos.tsx).
     ignorados_sem_pdf: semPdf,
+    ignorados_sem_pdf_detalhe: semPdfDetalhe,
     ignorados_por_tag: bloqueadosPorTag,
+    ignorados_por_tag_detalhe: bloqueadosPorTagDetalhe,
   });
 });
 

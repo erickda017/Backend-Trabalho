@@ -1,6 +1,7 @@
 import { supabase } from './supabase.js';
 import { escaparFiltroPostgrest } from './filtros.js';
 import { propagarDadosFatura } from './faturaPropagacao.js';
+import { normalizarNomeArquivo, normalizarTexto } from './nomeMatch.js';
 
 // Compartilhado entre boletos.routes.js (POST /salvar-pix, resultado vindo do
 // Cloudflare Worker no navegador) e pix.routes.js (POST /extrair-servidor,
@@ -91,4 +92,58 @@ export async function persistirExtracaoPix({ usuarioId, arquivo, pixCopiaCola, v
   }
 
   return serializarExtracaoPix({ ...extracao, origem });
+}
+
+// [2026-09] Espelha associarPendentesAoCliente (lib/faturasPendentes.js),
+// mesma ideia pra Pix: quando um Pix é extraído (/pix/extrair-servidor ou
+// /boletos/salvar-pix) ANTES do cliente correspondente existir,
+// resolverClientePix não acha ninguém e a extração fica salva com
+// cliente_id nulo. Sem isso, importar o Pix primeiro e os clientes depois
+// deixava a extração pendente pra sempre, exigindo vínculo manual na tela de
+// Pix -- mesmo quando o nome bate certinho com o cliente recém-criado.
+//
+// Chamada logo após CRIAR (ou upsertar) um cliente -- routes/clientes.routes.js
+// (POST /, POST /importar-lista) -- igual à chamada de
+// associarPendentesAoCliente que já roda nos mesmos lugares. Mesmo critério
+// de sempre pra casar nome (exato, senão "contém", mínimo 3 caracteres) e
+// mesma limitação assumida: só a PRIMEIRA extração pendente que bater: se
+// houver mais de uma pra pessoas de nome parecido, as demais continuam sem
+// cliente pra revisão manual em vez de arriscar adivinhar qual é a certa.
+export async function associarPixPendenteAoCliente(clienteId, nomeCliente, usuarioId) {
+  try {
+    const alvo = normalizarTexto(nomeCliente).replace(/\s+/g, ' ').trim();
+    if (!alvo || alvo.length < 3) return null;
+
+    const { data: pendentes, error } = await supabase
+      .from('pix_extracoes')
+      .select('id, arquivo, pix_code, valor, vencimento, linha_digitavel')
+      .eq('usuario_id', usuarioId)
+      .is('cliente_id', null);
+    if (error) throw error;
+
+    const candidatos = (pendentes || []).map((p) => ({ ...p, nomeNormalizado: normalizarNomeArquivo(p.arquivo) }));
+    const pendencia =
+      candidatos.find((p) => p.nomeNormalizado === alvo) ??
+      candidatos.find((p) => p.nomeNormalizado.length >= 3 && (alvo.includes(p.nomeNormalizado) || p.nomeNormalizado.includes(alvo))) ??
+      null;
+    if (!pendencia) return null;
+
+    const { error: updateClienteError } = await propagarDadosFatura(clienteId, usuarioId, {
+      pix_code: pendencia.pix_code,
+      ...(pendencia.valor ? { valor: pendencia.valor } : {}),
+      ...(pendencia.vencimento ? { vencimento: pendencia.vencimento } : {}),
+      ...(pendencia.linha_digitavel ? { linha_digitavel: pendencia.linha_digitavel } : {}),
+    });
+    if (updateClienteError) {
+      console.error('[pix] falha ao propagar Pix pendente pro cliente recém-criado:', updateClienteError.message);
+      return null;
+    }
+
+    await supabase.from('pix_extracoes').update({ cliente_id: clienteId }).eq('id', pendencia.id);
+    return { arquivo: pendencia.arquivo };
+  } catch (err) {
+    // Nunca derruba o fluxo principal (criação do cliente) por causa disso.
+    console.error('[pix] erro ao tentar associar Pix pendente:', err.message);
+    return null;
+  }
 }

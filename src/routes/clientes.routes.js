@@ -11,6 +11,7 @@ import { casarParesComClientes, normalizarTexto } from '../lib/nomeMatch.js';
 import { cancelarItensPendentesDosClientes } from '../lib/tagsEfeito.js';
 import { sugerirPromocoesSpd, proximaDataMesmoDia } from '../lib/promocaoSpd.js';
 import { associarPendentesAoCliente } from '../lib/faturasPendentes.js';
+import { associarPixPendenteAoCliente } from '../lib/pixPersistencia.js';
 import { achatarTags } from '../lib/achatarTags.js';
 import { iniciarVerificacao, statusVerificacao } from '../services/verificacaoVencimentos.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
@@ -160,6 +161,7 @@ router.post('/importar-lista', limiteSensivel, async (req, res) => {
 
     // Mesmo comportamento do cadastro manual (POST /) -- ver comentário lá.
     await associarPendentesAoCliente(data.id, item.nome, req.user.id);
+    await associarPixPendenteAoCliente(data.id, item.nome, req.user.id);
   }
 
   res.status(201).json({ criados: criados.length, erros, total: itens.length });
@@ -557,6 +559,9 @@ router.post('/', async (req, res) => {
   // cadastro existir), associa agora -- ver lib/faturasPendentes.js.
   // Best-effort: nunca falha a criação do cliente por causa disso.
   await associarPendentesAoCliente(data.id, data.nome, req.user.id);
+  // [2026-09] Mesma ideia, pra Pix já extraído sem cliente ainda (ver
+  // lib/pixPersistencia.js, associarPixPendenteAoCliente).
+  await associarPixPendenteAoCliente(data.id, data.nome, req.user.id);
 
   res.status(201).json({ ...data, tags: [] });
 });

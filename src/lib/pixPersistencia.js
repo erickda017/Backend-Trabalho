@@ -29,10 +29,21 @@ export async function resolverClientePix({ clienteId, arquivo, usuarioId }) {
       // diferentes). Agora busca TODOS os candidatos e só casa se houver
       // exatamente 1 -- ambíguo fica sem casar automaticamente (cai no
       // fluxo normal de "não achou cliente", ver persistirExtracaoPix).
+      //
+      // [2026-09 CRÍTICO] `.eq('campanha', 'cobranca')` -- Pix/PDF só existe
+      // pra carteira de cobrança (Ativação Chip não tem esse conceito, ver
+      // migration-25-ativacao-chip.sql). Sem este filtro, depois que a
+      // aba de chip passou a ter clientes de verdade, um cliente de chip
+      // com nome igual/parecido ao de um cliente de cobrança virava um
+      // SEGUNDO candidato no ILIKE -- 2 candidatos = ambíguo = a extração
+      // ficava sem casar, mesmo o cliente de cobrança certo já existindo.
+      // Bug relatado como "o sistema não tá associando os PDFs aos
+      // clientes como devia... começou depois de separar chip".
       const { data } = await supabase
         .from('clientes')
         .select('id')
         .eq('usuario_id', usuarioId)
+        .eq('campanha', 'cobranca')
         .ilike('nome', `%${escaparFiltroPostgrest(nomeBase)}%`);
       if (data?.length === 1) return data[0].id;
     }

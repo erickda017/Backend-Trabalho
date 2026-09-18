@@ -46,10 +46,17 @@ router.post('/avulsas', limiteSensivel, uploadPdfComTratamentoDeErro, async (req
   try {
     // Casa pelo nome do arquivo contra os clientes JÁ cadastrados do
     // usuário -- mesmo critério usado em todo o resto do sistema.
+    // [2026-09 CRÍTICO] `.eq('campanha', 'cobranca')` -- PDF de fatura só
+    // existe pra carteira de cobrança (Ativação Chip não tem esse conceito).
+    // Sem este filtro, um cliente de chip com nome igual/parecido ao de um
+    // cliente de cobrança virava candidato aqui também -- 2+ candidatos faz
+    // `casarClientePorArquivo` desistir (ambíguo, ver lib/nomeMatch.js), e o
+    // PDF ficava pendente mesmo com o cliente certo já cadastrado.
     const { data: clientes, error: clientesError } = await supabase
       .from('clientes')
       .select('id, nome')
-      .eq('usuario_id', usuarioId);
+      .eq('usuario_id', usuarioId)
+      .eq('campanha', 'cobranca');
     if (clientesError) return res.status(500).json({ error: clientesError.message });
 
     const clienteCasado = casarClientePorArquivo(nomeOriginal, clientes || []);

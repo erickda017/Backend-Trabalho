@@ -558,10 +558,17 @@ router.post('/', async (req, res) => {
   // PDF avulso esperando por um cliente com este nome (subido antes deste
   // cadastro existir), associa agora -- ver lib/faturasPendentes.js.
   // Best-effort: nunca falha a criação do cliente por causa disso.
-  await associarPendentesAoCliente(data.id, data.nome, req.user.id);
-  // [2026-09] Mesma ideia, pra Pix já extraído sem cliente ainda (ver
-  // lib/pixPersistencia.js, associarPixPendenteAoCliente).
-  await associarPixPendenteAoCliente(data.id, data.nome, req.user.id);
+  // [2026-09 CRÍTICO] Só faz sentido pra campanha 'cobranca' -- PDF/Pix não
+  // existe pra Ativação Chip. Sem essa checagem, um cliente de chip recém-
+  // criado (esta rota aceita `campanha` no corpo) podia "roubar" um PDF/Pix
+  // pendente de um cliente de cobrança de nome parecido que ainda nem tinha
+  // sido cadastrado.
+  if (data.campanha === 'cobranca') {
+    await associarPendentesAoCliente(data.id, data.nome, req.user.id);
+    // [2026-09] Mesma ideia, pra Pix já extraído sem cliente ainda (ver
+    // lib/pixPersistencia.js, associarPixPendenteAoCliente).
+    await associarPixPendenteAoCliente(data.id, data.nome, req.user.id);
+  }
 
   res.status(201).json({ ...data, tags: [] });
 });

@@ -63,8 +63,7 @@ async function acharPendenciaParaCliente(nomeCliente, usuarioId) {
 }
 
 // Chamada logo após CRIAR (ou identificar) um cliente -- em
-// routes/clientes.routes.js (POST /, POST /importar-lista) e em
-// services/importLote.js (upsert de cada linha). Se houver uma fatura
+// routes/clientes.routes.js (POST /, POST /importar-lista). Se houver uma fatura
 // avulsa pendente com nome de arquivo compatível, move o PDF pra dentro da
 // pasta do cliente e grava os dados nele (propaga pro grupo, se houver
 // números vinculados). Silenciosa quando não há match -- é o caminho comum

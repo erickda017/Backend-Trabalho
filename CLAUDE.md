@@ -121,7 +121,11 @@ do Supabase Auth.
 - Telefone sempre normalizado (dígitos + DDI, ex: `5511999999999`) via
   `Backend-Trabalho/src/lib/telefone.js` — assume Brasil (`55`) fixo, decisão
   consciente, não bug.
-- Import/export de planilha tolera variações de nome de coluna
-  (acento/maiúscula-insensitive) — ver `Backend-Trabalho/src/services/importLote.js`.
+- **[2026-09] Não existe mais upload de planilha+zip de PDFs** — cadastro em
+  massa de clientes é só colar a lista crua (`POST /clientes/converter-lista`
+  + `/importar-lista`, sem PDF nenhum), PDFs sobem depois, soltos, via
+  `POST /faturas/avulsas` (`Backend-Trabalho/src/routes/faturasPendentes.routes.js`),
+  casados só pelo nome do arquivo (nunca passa pelo Worker de OCR). Ver
+  `Front-Trabalho/CONTEXTO.md` ("PDF sem planilha obrigatória").
 - Toda alteração relevante de negócio deve ser registrada no
   `Front-Trabalho/CONTEXTO.md`, não só neste arquivo.

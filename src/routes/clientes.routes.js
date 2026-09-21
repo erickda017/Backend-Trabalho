@@ -16,7 +16,7 @@ import { achatarTags } from '../lib/achatarTags.js';
 import { iniciarVerificacao, statusVerificacao } from '../services/verificacaoVencimentos.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
-import { limiteSensivel } from '../lib/rateLimit.js';
+import { limiteSensivel, limiteImportacaoArquivo } from '../lib/rateLimit.js';
 
 const router = Router();
 const upload = multer({
@@ -580,7 +580,11 @@ router.post('/', async (req, res) => {
 // frontend/src/lib/pixWorkerClient.ts) -- os campos pixCode/valor/vencimento/
 // linhaDigitavel, se enviados no body junto do arquivo, já vêm prontos do
 // Worker; esta rota só guarda o PDF no Storage e persiste o que recebeu.
-router.post('/:id/pdf', limiteSensivel, uploadPdfComTratamentoDeErro, async (req, res) => {
+// [2026-09] `limiteImportacaoArquivo`, não `limiteSensivel` -- esta rota é
+// chamada 1 vez POR ARQUIVO dentro do fluxo em lote do Extrator de Pix (ver
+// routes/pix.tsx, `extrair()`, batches de 10), não só manualmente 1 PDF por
+// vez na ficha do cliente. Ver comentário completo em lib/rateLimit.js.
+router.post('/:id/pdf', limiteImportacaoArquivo, uploadPdfComTratamentoDeErro, async (req, res) => {
   const { id } = req.params;
   if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
 

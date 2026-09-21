@@ -45,3 +45,24 @@ export const limiteSensivel = rateLimit({
   keyGenerator: chave,
   message: { error: 'Muitas requisições em pouco tempo nesta operação. Aguarde um pouco e tente de novo.' },
 });
+
+// [2026-09] Relatado: "tô tentando importar um bocado de clientes mas dá
+// esse erro antes de funcionar 'Muitas requisições em pouco tempo...'".
+// Causa: Importar (planilha+zip) e o Extrator de Pix "opção 2" mandam 1
+// requisição HTTP POR ARQUIVO (ver importacaoBrowser.ts/pix.tsx no front --
+// upload em lotes de 10, até 3 em paralelo), não 1 ação isolada como
+// disparar um lote ou mandar mensagem de teste. Uma importação legítima de
+// algumas centenas de clientes passa das 30 requisições/5min de
+// `limiteSensivel` bem antes de terminar -- o operador via o erro de rate
+// limit no MEIO de uma importação normal, sem ter feito nada de errado.
+// Rotas "1 arquivo por chamada dentro de um lote maior" usam este limitador
+// à parte, bem mais alto (ainda finito -- não remove a proteção, só ajusta
+// o teto pro volume real desse tipo de operação).
+export const limiteImportacaoArquivo = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 1000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: chave,
+  message: { error: 'Muitas requisições em pouco tempo nesta importação. Aguarde um pouco e tente de novo.' },
+});

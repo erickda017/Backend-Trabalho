@@ -6,7 +6,7 @@ import { propagarDadosFatura } from '../lib/faturaPropagacao.js';
 import { criarPendencia } from '../lib/faturasPendentes.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
-import { limiteSensivel } from '../lib/rateLimit.js';
+import { limiteImportacaoArquivo } from '../lib/rateLimit.js';
 
 // ---------------------------------------------------------------------------
 // "Upload de faturas avulsas, sem depender de planilha" -- pra quando o
@@ -37,7 +37,16 @@ const uploadPdfComTratamentoDeErro = comTratamentoDeErroUpload(upload.single('pd
 // POST /api/faturas/avulsas -- 1 PDF por requisição (o front chama uma vez
 // por arquivo, igual ao restante dos fluxos de upload deste projeto).
 // Body (multipart): pdf (arquivo), pixCode?/valor?/vencimento?/linhaDigitavel?
-router.post('/avulsas', limiteSensivel, uploadPdfComTratamentoDeErro, async (req, res) => {
+// [2026-09] `limiteImportacaoArquivo`, não `limiteSensivel` -- desde que a
+// importação de planilha+zip foi removida (ver CONTEXTO.md, "PDF sem
+// planilha obrigatória"), esta rota virou o ÚNICO caminho de subir PDF em
+// massa (usada por UploadAvulsoFaturas nas telas Clientes E Importar), 1
+// requisição por arquivo. Relatado de novo: "erro de requisição demais" /
+// "failed to load resource" no meio de um upload em lote -- mesmo sintoma
+// já corrigido antes em /importacao/upload-pdf, /clientes/:id/pdf e
+// /pix/extrair-servidor (ver lib/rateLimit.js), só que esta rota ficou de
+// fora daquele fix por não ser, na época, um caminho de bulk upload.
+router.post('/avulsas', limiteImportacaoArquivo, uploadPdfComTratamentoDeErro, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'arquivo pdf não enviado' });
   const usuarioId = req.user.id;
   const nomeOriginal = req.file.originalname;

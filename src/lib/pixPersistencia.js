@@ -3,6 +3,7 @@ import { buscarTodos } from './buscarTodos.js';
 import { escaparFiltroPostgrest } from './filtros.js';
 import { propagarDadosFatura } from './faturaPropagacao.js';
 import { normalizarNomeArquivo, normalizarTexto } from './nomeMatch.js';
+import { logLimitado } from './log.js';
 
 // Compartilhado entre boletos.routes.js (POST /salvar-pix, resultado vindo do
 // Cloudflare Worker no navegador) e pix.routes.js (POST /extrair-servidor,
@@ -111,7 +112,7 @@ export async function persistirExtracaoPix({ usuarioId, arquivo, pixCopiaCola, v
       ...(vencimento ? { vencimento } : {}),
       ...(linhaDigitavel ? { linha_digitavel: linhaDigitavel } : {}),
     });
-    if (updateError) console.error('[pix] falha ao atualizar cliente com o Pix:', updateError.message);
+    if (updateError) logLimitado('pix-atualizar', 'error', `[pix] falha ao atualizar cliente ${clienteResolvido} com o Pix:`, updateError.message);
   }
 
   return serializarExtracaoPix({ ...extracao, origem });
@@ -161,7 +162,7 @@ export async function associarPixPendenteAoCliente(clienteId, nomeCliente, usuar
       ...(pendencia.linha_digitavel ? { linha_digitavel: pendencia.linha_digitavel } : {}),
     });
     if (updateClienteError) {
-      console.error('[pix] falha ao propagar Pix pendente pro cliente recém-criado:', updateClienteError.message);
+      logLimitado('pix-propagar', 'error', `[pix] falha ao propagar Pix pendente pro cliente recém-criado ${clienteId}:`, updateClienteError.message);
       return null;
     }
 
@@ -169,7 +170,7 @@ export async function associarPixPendenteAoCliente(clienteId, nomeCliente, usuar
     return { arquivo: pendencia.arquivo };
   } catch (err) {
     // Nunca derruba o fluxo principal (criação do cliente) por causa disso.
-    console.error('[pix] erro ao tentar associar Pix pendente:', err.message);
+    logLimitado('pix-assoc', 'error', `[pix] erro ao tentar associar Pix pendente (cliente ${clienteId}):`, err.message);
     return null;
   }
 }

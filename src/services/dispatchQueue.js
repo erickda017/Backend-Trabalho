@@ -2,6 +2,7 @@ import { supabase, BUCKET, CHAT_BUCKET, gerarSignedUrl } from '../lib/supabase.j
 import { enviarMensagemComPdf, enviarMensagemComAnexo, enviarMensagemTexto, validarNumero, isConnectedQualquerSlot, escolherSlotParaEnvio } from './whatsapp.js';
 import { dispararWebhook } from './webhook.js';
 import { registrarMensagemSaida } from './chatIngest.js';
+import { logLimitado } from '../lib/log.js';
 
 const MIN_DELAY = Number(process.env.MIN_DELAY_MS || 5000);
 const MAX_DELAY = Number(process.env.MAX_DELAY_MS || 15000);
@@ -260,12 +261,14 @@ async function enviarItem(item, envio, usuarioId) {
         campanha: envio.campanha || 'cobranca',
       });
     } catch (chatErr) {
-      console.error(`[dispatch] erro ao registrar no chat para ${cliente.nome}:`, chatErr.message);
+      logLimitado(`dispatch-chat:${envio.id}`, 'error', `[dispatch] erro ao registrar no chat (envio ${envio.id}, item ${item.id}):`, chatErr.message);
     }
 
     await dispararWebhook('mensagem_enviada', { cliente, envio_id: envio.id, message_id: messageId });
   } catch (err) {
-    console.error(`[dispatch] erro ao enviar para ${cliente.nome}:`, err.message);
+    // [log] limitado por envio: num lote de 300 com o mesmo problema saíam
+    // 300 linhas. O erro de CADA item continua gravado em envio_itens.erro.
+    logLimitado(`dispatch-envio-err:${envio.id}`, 'error', `[dispatch] erro ao enviar (envio ${envio.id}, item ${item.id}):`, err.message);
     await supabase.from('envio_itens').update({ status: 'erro', erro: err.message }).eq('id', item.id);
 
     await dispararWebhook('erro_envio', { cliente, envio_id: envio.id, erro: err.message });
@@ -365,7 +368,11 @@ export async function processarDisparo(envioId, usuarioId) {
             retomar_em: retomarEm.toISOString(),
           });
 
-          console.log(
+          // [log] limitado: com o Zap desconectado, scheduler retoma e
+          // pausa de novo a cada ciclo, indefinidamente.
+          logLimitado(
+            `dispatch-sem-conexao:${envioId}`,
+            'log',
             `[dispatch] conexão WhatsApp indisponível (usuário ${usuarioId}), pausando disparo ${envioId}. Retomando em ${retomarEm.toISOString()}`
           );
           return;

@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import { logLimitado } from './log.js';
 
 dotenv.config();
 
@@ -59,12 +60,12 @@ export async function gerarSignedUrl(bucket, path, ttlSegundos = SIGNED_URL_TTL_
     const { armazenamento } = await import('./armazenamento.js');
     const { data, error } = await armazenamento.from(bucket).createSignedUrl(path, ttlSegundos);
     if (error) {
-      console.error(`[storage] erro ao assinar URL (bucket=${bucket}, path=${path}):`, error.message);
+      logLimitado(`storage-sign:${bucket}`, 'error', `[storage] erro ao assinar URL (bucket=${bucket}, path=${path}):`, error.message);
       return null;
     }
     return data?.signedUrl || null;
   } catch (err) {
-    console.error(`[storage] exceção ao assinar URL (bucket=${bucket}, path=${path}):`, err.message);
+    logLimitado(`storage-sign-exc:${bucket}`, 'error', `[storage] exceção ao assinar URL (bucket=${bucket}, path=${path}):`, err.message);
     return null;
   }
 }

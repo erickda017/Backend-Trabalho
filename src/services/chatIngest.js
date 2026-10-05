@@ -3,6 +3,7 @@ import pino from 'pino';
 import { supabase, CHAT_BUCKET } from '../lib/supabase.js';
 import { normalizarTelefone, normalizarVariantes } from '../lib/telefone.js';
 import { armazenamento } from '../lib/armazenamento.js';
+import { logLimitado } from '../lib/log.js';
 
 const logger = pino({ level: 'silent' });
 
@@ -427,7 +428,7 @@ async function processarMensagem(sock, waMessage, usuarioId) {
       anexoPath = resultado.anexoPath;
       anexoNome = resultado.anexoNome;
     } catch (err) {
-      console.error('[chatIngest] erro ao baixar mídia:', err.message);
+      logLimitado('chat-midia', 'error', `[chatIngest] erro ao baixar mídia (usuário ${usuarioId}, msg ${messageId}):`, err.message);
       // segue sem anexo -- melhor perder o arquivo do que perder o registro da mensagem
     }
   }

@@ -2,6 +2,7 @@ import { supabase, BUCKET } from './supabase.js';
 import { normalizarNomeArquivo, normalizarTexto } from './nomeMatch.js';
 import { propagarDadosFatura } from './faturaPropagacao.js';
 import { armazenamento } from './armazenamento.js';
+import { logLimitado } from './log.js';
 
 // ---------------------------------------------------------------------------
 // "Upload de faturas avulsas, sem planilha" -- ver migration-18 pro desenho
@@ -77,7 +78,7 @@ export async function associarPendentesAoCliente(clienteId, nomeCliente, usuario
     const novoCaminho = `${clienteId}/${Date.now()}-${pendencia.arquivo.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
     const { error: moveError } = await armazenamento.from(BUCKET).move(pendencia.pdf_path, novoCaminho);
     if (moveError) {
-      console.error('[faturasPendentes] falha ao mover PDF pendente pro cliente:', moveError.message);
+      logLimitado('pend-mover', 'error', `[faturasPendentes] falha ao mover PDF pendente pro cliente ${clienteId}:`, moveError.message);
       return null;
     }
 
@@ -90,7 +91,7 @@ export async function associarPendentesAoCliente(clienteId, nomeCliente, usuario
       pdf_atualizado_em: new Date().toISOString(),
     });
     if (updateError) {
-      console.error('[faturasPendentes] falha ao gravar dados da fatura associada:', updateError.message);
+      logLimitado('pend-gravar', 'error', `[faturasPendentes] falha ao gravar dados da fatura associada (cliente ${clienteId}):`, updateError.message);
       return null;
     }
 
@@ -98,7 +99,7 @@ export async function associarPendentesAoCliente(clienteId, nomeCliente, usuario
     return { arquivo: pendencia.arquivo, pdf_path: novoCaminho };
   } catch (err) {
     // Nunca derruba o fluxo principal (criação do cliente) por causa disso.
-    console.error('[faturasPendentes] erro ao tentar associar pendências:', err.message);
+    logLimitado('pend-assoc', 'error', `[faturasPendentes] erro ao tentar associar pendências (cliente ${clienteId}):`, err.message);
     return null;
   }
 }

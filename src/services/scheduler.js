@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase.js';
 import { processarDisparo, disparoEmAndamento } from './dispatchQueue.js';
+import { logLimitado } from '../lib/log.js';
 
 const INTERVALO_VERIFICACAO_MS = 60 * 1000; // checa a cada 1 minuto
 
@@ -41,7 +42,7 @@ async function verificarEnviosPendentes() {
     if (disparoEmAndamento(envio.usuario_id)) continue; // esse usuário já tem disparo rodando
 
     usuariosJaDisparadosNesteCiclo.add(envio.usuario_id);
-    console.log(`[scheduler] iniciando/retomando envio ${envio.id} (usuário ${envio.usuario_id})`);
+    logLimitado(`scheduler-retomar:${envio.id}`, 'log', `[scheduler] iniciando/retomando envio ${envio.id} (usuário ${envio.usuario_id})`);
     processarDisparo(envio.id, envio.usuario_id).catch((err) => console.error('[scheduler] erro:', err.message));
   }
 }

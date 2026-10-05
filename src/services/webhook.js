@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import { logLimitado } from '../lib/log.js';
 
 // Dispara um webhook HTTP (se configurado) para eventos do sistema:
 // disparo iniciado/concluído, mensagem enviada, erro, status de entrega/leitura, etc.
@@ -60,6 +61,8 @@ export async function dispararWebhook(evento, dados) {
       clearTimeout(timeoutId);
     }
   } catch (err) {
-    console.error(`[webhook] falha ao notificar evento "${evento}":`, err.message);
+    // [log] limitado por evento: dispara por mensagem/atualização de entrega,
+    // então um WEBHOOK_URL fora do ar gerava 1 linha por evento.
+    logLimitado(`webhook:${evento}`, 'error', `[webhook] falha ao notificar evento "${evento}":`, err.message);
   }
 }

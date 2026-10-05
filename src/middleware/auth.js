@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase.js';
+import { logLimitado } from '../lib/log.js';
 
 // Verifica o token JWT do Supabase Auth enviado no header Authorization: Bearer <token>
 export async function requireAuth(req, res, next) {
@@ -34,7 +35,8 @@ export async function requireAuth(req, res, next) {
     if (perfilError) throw perfilError;
     req.user.role = perfil?.role || 'operador';
   } catch (err) {
-    console.error('[auth] falha ao sincronizar perfil (seguindo como operador):', err.message);
+    // [log] roda por request -- com o banco fora, sairia 1 linha por chamada.
+    logLimitado('auth-perfil', 'error', `[auth] falha ao sincronizar perfil (usuário ${req.user.id}, seguindo como operador):`, err.message);
     req.user.role = 'operador';
   }
 

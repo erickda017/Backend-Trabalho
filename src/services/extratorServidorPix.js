@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import jsQR from 'jsqr';
 import { isValidPixPayload } from '../lib/pixValidacao.js';
+import { logLimitado } from '../lib/log.js';
 
 // ---------------------------------------------------------------------------
 // [2026-08] EXTRAÇÃO DE PIX NO SERVIDOR -- "opção 2" (a padrão continua sendo
@@ -137,7 +138,7 @@ function lerQrDoCanvas(context, width, height) {
     const payload = resultado?.data?.trim();
     return isValidPixPayload(payload) ? payload : null;
   } catch (err) {
-    console.warn('[extratorServidorPix] jsQR falhou:', err.message);
+    logLimitado('jsqr', 'warn', '[extratorServidorPix] jsQR falhou:', err.message);
     return null;
   }
 }

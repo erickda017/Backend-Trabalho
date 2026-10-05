@@ -7,6 +7,7 @@ import { useSupabaseAuthState } from '../lib/supabaseAuthState.js';
 import { dispararWebhook } from './webhook.js';
 import { normalizarTelefone, formatJid } from '../lib/telefone.js';
 import { registrarMensagensRecebidas, registrarHistoricoInicial } from './chatIngest.js';
+import { logLimitado, logVerboso } from '../lib/log.js';
 
 const logger = pino({ level: 'silent' });
 
@@ -161,7 +162,7 @@ export async function conectarUsuario(usuarioId, slot = SLOT_PADRAO) {
       estado.telefone = normalizarTelefone(sock.user?.id?.split(':')[0] || sock.user?.id || '') || null;
       estado.nome = sock.user?.name || sock.user?.notify || null;
       estado.ultimaConexao = new Date().toISOString();
-      console.log(`[whatsapp] usuário ${usuarioId} (slot ${slot}) conectado`);
+      logLimitado(`wa-open:${usuarioId}:${slot}`, 'log', `[whatsapp] usuário ${usuarioId} (slot ${slot}) conectado`);
     }
 
     if (connection === 'close') {
@@ -172,10 +173,16 @@ export async function conectarUsuario(usuarioId, slot = SLOT_PADRAO) {
       // auto-reconnect abaixo podia vencer a corrida com o logout manual e
       // religar a sessão segundos depois, dando a impressão de botão travado.
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut && !estado.desconectandoManual;
-      console.log(`[whatsapp] usuário ${usuarioId} (slot ${slot}) conexão fechada. Reconectar?`, shouldReconnect);
+      // [log] limitado por usuário/slot: num loop de reconexão (rede instável,
+      // sessão corrompida) isso saía várias vezes por minuto, pra sempre.
+      logLimitado(
+        `wa-close:${usuarioId}:${slot}`,
+        'log',
+        `[whatsapp] usuário ${usuarioId} (slot ${slot}) conexão fechada (statusCode=${statusCode ?? '-'}). Reconectar? ${shouldReconnect}`
+      );
       if (shouldReconnect) {
         conectarUsuario(usuarioId, slot).catch((err) =>
-          console.error(`[whatsapp] erro ao reconectar usuário ${usuarioId} (slot ${slot}):`, err.message)
+          logLimitado(`wa-reconn-err:${usuarioId}:${slot}`, 'error', `[whatsapp] erro ao reconectar usuário ${usuarioId} (slot ${slot}):`, err.message)
         );
       }
     }
@@ -211,7 +218,7 @@ export async function conectarUsuario(usuarioId, slot = SLOT_PADRAO) {
           });
         }
       } catch (err) {
-        console.error('[whatsapp] erro ao atualizar status de entrega:', err.message);
+        logLimitado('wa-status-entrega', 'error', `[whatsapp] erro ao atualizar status de entrega (usuário ${usuarioId}, msg ${messageId}):`, err.message);
       }
     }
   });
@@ -229,17 +236,32 @@ export async function conectarUsuario(usuarioId, slot = SLOT_PADRAO) {
     // celular e esta conexão vinculada ficou dessincronizada) -- nesse caso a
     // solução é reconectar (Desconectar + escanear o QR de novo), não um bug de
     // código: sem a chave decifrada não tem texto nenhum pra salvar.
+    //
+    // [log 2026-10] Era a MAIOR fonte de volume no Render: 1 linha por
+    // mensagem, inclusive lotes de sincronização (tipo=append, centenas de
+    // uma vez). Agora a linha completa só sai em dev (ou LOG_VERBOSE=true).
+    // Em produção fica só o sinal que esse log existia pra mostrar: eco
+    // fromMe sem conteúdo / com stubType (sessão de criptografia
+    // dessincronizada), limitado por usuário.
     for (const m of messages) {
-      console.log(
-        `[whatsapp] usuário ${usuarioId} messages.upsert tipo=${type} fromMe=${m.key?.fromMe} remoteJid=${m.key?.remoteJid} id=${m.key?.id} temConteudo=${Boolean(m.message)} stubType=${m.messageStubType ?? '-'}`
-      );
+      if (logVerboso) {
+        console.log(
+          `[whatsapp] usuário ${usuarioId} messages.upsert tipo=${type} fromMe=${m.key?.fromMe} remoteJid=${m.key?.remoteJid} id=${m.key?.id} temConteudo=${Boolean(m.message)} stubType=${m.messageStubType ?? '-'}`
+        );
+      } else if (type === 'notify' && m.key?.fromMe && (!m.message || m.messageStubType != null)) {
+        logLimitado(
+          `wa-eco-ilegivel:${usuarioId}`,
+          'warn',
+          `[whatsapp] usuário ${usuarioId}: eco fromMe sem conteúdo (stubType=${m.messageStubType ?? '-'}) -- possível sessão dessincronizada, reconectar resolve`
+        );
+      }
     }
 
     if (type !== 'notify') return; // 'notify' = mensagem nova chegando agora (ignora replays de sincronização, tratados abaixo)
     try {
       await registrarMensagensRecebidas(sock, messages, usuarioId);
     } catch (err) {
-      console.error('[whatsapp] erro ao registrar mensagens recebidas:', err.message);
+      logLimitado('wa-registrar-recebidas', 'error', `[whatsapp] erro ao registrar mensagens recebidas (usuário ${usuarioId}):`, err.message);
     }
   });
 

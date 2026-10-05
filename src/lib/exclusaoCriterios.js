@@ -228,7 +228,7 @@ const clientesPorTag = {
     if (pdfPaths.length) {
       const falharam = await removerDoStorageEmLotes(BUCKET, pdfPaths);
       if (falharam.length) {
-        console.error(`[exclusao] ${falharam.length} PDF(s) ficaram órfãos no Storage (cliente foi apagado mesmo assim):`, falharam);
+        console.error(`[exclusao] ${falharam.length} PDF(s) ficaram órfãos no Storage (cliente foi apagado mesmo assim). Primeiros:`, falharam.slice(0, 10));
       }
     }
     const { error } = await supabase
@@ -301,7 +301,7 @@ const historicoMensagens = {
     if (caminhos.length) {
       const falharam = await removerDoStorageEmLotes(CHAT_BUCKET, caminhos);
       if (falharam.length) {
-        console.error(`[exclusao] ${falharam.length} anexo(s) ficaram órfãos no Storage (conversa foi apagada mesmo assim):`, falharam);
+        console.error(`[exclusao] ${falharam.length} anexo(s) ficaram órfãos no Storage (conversa foi apagada mesmo assim). Primeiros:`, falharam.slice(0, 10));
       }
     }
 

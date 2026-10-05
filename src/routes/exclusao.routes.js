@@ -3,6 +3,7 @@ import { CRITERIOS, montarResumoExclusao } from '../lib/exclusaoCriterios.js';
 import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
 import { limiteSensivel } from '../lib/rateLimit.js';
 import { supabase, BUCKET } from '../lib/supabase.js';
+import { armazenamento } from '../lib/armazenamento.js';
 
 const router = Router();
 
@@ -81,7 +82,7 @@ router.get('/diagnostico-storage', async (req, res) => {
   const caminho = `_diagnostico/teste-${Date.now()}.txt`;
   const resultado = { bucket: BUCKET, caminho };
 
-  const { error: uploadError } = await supabase.storage
+  const { error: uploadError } = await armazenamento
     .from(BUCKET)
     .upload(caminho, Buffer.from('arquivo de teste do diagnóstico do painel de exclusão'), {
       contentType: 'text/plain',
@@ -92,14 +93,14 @@ router.get('/diagnostico-storage', async (req, res) => {
     return res.json(resultado); // sem upload bem-sucedido, não faz sentido tentar remover
   }
 
-  const { data: removeData, error: removeError } = await supabase.storage.from(BUCKET).remove([caminho]);
+  const { data: removeData, error: removeError } = await armazenamento.from(BUCKET).remove([caminho]);
   resultado.remocao = removeError
     ? { ok: false, erro: removeError.message }
     : { ok: (removeData || []).length === 1, confirmados: (removeData || []).map((d) => d.name) };
 
   // Confere de verdade se o arquivo ainda existe (list() na pasta) --
   // independe do que a chamada de remove() alegou, é a fonte da verdade.
-  const { data: listagem, error: listError } = await supabase.storage.from(BUCKET).list('_diagnostico');
+  const { data: listagem, error: listError } = await armazenamento.from(BUCKET).list('_diagnostico');
   resultado.confirmacao_via_list = listError
     ? { erro: listError.message }
     : { ainda_existe: (listagem || []).some((f) => `_diagnostico/${f.name}` === caminho) };

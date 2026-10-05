@@ -17,6 +17,7 @@ import { iniciarVerificacao, statusVerificacao } from '../services/verificacaoVe
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 import { limiteSensivel, limiteImportacaoArquivo } from '../lib/rateLimit.js';
+import { armazenamento } from '../lib/armazenamento.js';
 
 const router = Router();
 const upload = multer({
@@ -596,7 +597,7 @@ router.post('/:id/pdf', limiteImportacaoArquivo, uploadPdfComTratamentoDeErro, a
 
   const caminho = `${id}/${Date.now()}-${nomeArquivoSeguro(req.file.originalname)}`;
 
-  const { error: uploadError } = await supabase.storage
+  const { error: uploadError } = await armazenamento
     .from(BUCKET)
     .upload(caminho, req.file.buffer, { contentType: 'application/pdf', upsert: true });
 
@@ -856,7 +857,7 @@ router.delete('/:id', async (req, res) => {
   });
 
   if (cliente.pdf_path) {
-    const { error: storageError } = await supabase.storage.from(BUCKET).remove([cliente.pdf_path]);
+    const { error: storageError } = await armazenamento.from(BUCKET).remove([cliente.pdf_path]);
     if (storageError) console.error('[clientes] erro ao remover pdf do storage:', storageError.message);
   }
 

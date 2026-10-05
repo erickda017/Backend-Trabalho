@@ -7,6 +7,7 @@ import { criarPendencia } from '../lib/faturasPendentes.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 import { limiteImportacaoArquivo } from '../lib/rateLimit.js';
+import { armazenamento } from '../lib/armazenamento.js';
 
 // ---------------------------------------------------------------------------
 // "Upload de faturas avulsas, sem depender de planilha" -- pra quando o
@@ -72,7 +73,7 @@ router.post('/avulsas', limiteImportacaoArquivo, uploadPdfComTratamentoDeErro, a
 
     if (clienteCasado) {
       const caminho = `${clienteCasado.id}/${Date.now()}-${nomeArquivoSeguro(nomeOriginal)}`;
-      const { error: uploadError } = await supabase.storage
+      const { error: uploadError } = await armazenamento
         .from(BUCKET)
         .upload(caminho, req.file.buffer, { contentType: 'application/pdf', upsert: true });
       if (uploadError) return res.status(500).json({ error: uploadError.message });
@@ -101,7 +102,7 @@ router.post('/avulsas', limiteImportacaoArquivo, uploadPdfComTratamentoDeErro, a
     // criado (cadastro manual, lista colada, importação em lote), a
     // associação é feita sozinha (ver lib/faturasPendentes.js).
     const caminhoPendente = `pendentes/${usuarioId}/${Date.now()}-${nomeArquivoSeguro(nomeOriginal)}`;
-    const { error: uploadError } = await supabase.storage
+    const { error: uploadError } = await armazenamento
       .from(BUCKET)
       .upload(caminhoPendente, req.file.buffer, { contentType: 'application/pdf', upsert: true });
     if (uploadError) return res.status(500).json({ error: uploadError.message });
@@ -168,7 +169,7 @@ router.post('/avulsas/pendentes/:id/associar', async (req, res) => {
   if (!donoCliente) return res.status(404).json({ error: 'Cliente não encontrado' });
 
   const novoCaminho = `${cliente_id}/${Date.now()}-${nomeArquivoSeguro(pendencia.arquivo)}`;
-  const { error: moveError } = await supabase.storage.from(BUCKET).move(pendencia.pdf_path, novoCaminho);
+  const { error: moveError } = await armazenamento.from(BUCKET).move(pendencia.pdf_path, novoCaminho);
   if (moveError) return res.status(500).json({ error: moveError.message });
 
   const { error: updateError } = await propagarDadosFatura(cliente_id, usuarioId, {
@@ -199,7 +200,7 @@ router.delete('/avulsas/pendentes/:id', async (req, res) => {
     .maybeSingle();
   if (!pendencia) return res.status(404).json({ error: 'Pendência não encontrada' });
 
-  await supabase.storage.from(BUCKET).remove([pendencia.pdf_path]);
+  await armazenamento.from(BUCKET).remove([pendencia.pdf_path]);
   await supabase.from('faturas_pendentes').delete().eq('id', id).eq('usuario_id', usuarioId);
   res.json({ ok: true });
 });

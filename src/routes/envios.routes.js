@@ -24,6 +24,7 @@ import { agregarContadores } from '../lib/agregarContadores.js';
 import { limiteSensivel } from '../lib/rateLimit.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
+import { armazenamento } from '../lib/armazenamento.js';
 
 const router = Router();
 
@@ -252,7 +253,7 @@ router.post('/anexo-foto', limiteSensivel, uploadFotoComTratamentoDeErro, async 
   // POST / valida abaixo antes de aceitar um foto_path vindo do corpo.
   const caminho = `${usuarioId}/disparo/${Date.now()}-${nomeArquivoSeguro(req.file.originalname, 'foto.jpg')}`;
 
-  const { error: uploadError } = await supabase.storage
+  const { error: uploadError } = await armazenamento
     .from(CHAT_BUCKET)
     .upload(caminho, req.file.buffer, { contentType: req.file.mimetype, upsert: true });
   if (uploadError) return res.status(500).json({ error: uploadError.message });

@@ -22,6 +22,7 @@
 import { supabase, BUCKET } from '../lib/supabase.js';
 import { propagarDadosFatura } from '../lib/faturaPropagacao.js';
 import { executarSequencial, carregarPdfjs, carregarCanvas, criarFabricaCanvas } from './extratorServidorPix.js';
+import { armazenamento } from '../lib/armazenamento.js';
 
 const WORKER_URL = process.env.WORKER_URL || 'https://processo-de-pdf.erickramiro2010.workers.dev';
 // Delay entre clientes -- o Worker chama o OCR.space (rate limit de terceiro,
@@ -127,7 +128,7 @@ function esperar(ms) {
 // vencimento -- devolve a data já no formato BR ("DD/MM/AAAA", o mesmo que
 // `clientes.vencimento` usa em todo o resto do sistema) ou null se não achou.
 async function extrairVencimentoDoPdf(pdfPath) {
-  const { data: blob, error } = await supabase.storage.from(BUCKET).download(pdfPath);
+  const { data: blob, error } = await armazenamento.from(BUCKET).download(pdfPath);
   if (error || !blob) throw new Error(error?.message || 'não foi possível baixar o PDF do Storage');
   const bytes = new Uint8Array(await blob.arrayBuffer());
 

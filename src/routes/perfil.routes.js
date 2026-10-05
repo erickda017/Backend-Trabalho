@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { supabase, AVATAR_BUCKET, urlProxyArquivo } from '../lib/supabase.js';
+import { armazenamento } from '../lib/armazenamento.js';
 
 const router = Router();
 const upload = multer({
@@ -53,13 +54,13 @@ router.put('/me', upload.single('foto'), async (req, res) => {
 
   const caminhoAvatar = `${usuarioId}/avatar`;
   if (req.file) {
-    const { error: uploadError } = await supabase.storage
+    const { error: uploadError } = await armazenamento
       .from(AVATAR_BUCKET)
       .upload(caminhoAvatar, req.file.buffer, { contentType: req.file.mimetype, upsert: true });
     if (uploadError) return res.status(500).json({ error: uploadError.message });
     atualizacao.avatar_path = caminhoAvatar;
   } else if (removerFoto === 'true' || removerFoto === '1') {
-    await supabase.storage.from(AVATAR_BUCKET).remove([caminhoAvatar]).catch(() => {});
+    await armazenamento.from(AVATAR_BUCKET).remove([caminhoAvatar]).catch(() => {});
     atualizacao.avatar_path = null;
   }
 

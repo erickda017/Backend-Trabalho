@@ -1,6 +1,7 @@
 import { supabase, BUCKET } from './supabase.js';
 import { normalizarNomeArquivo, normalizarTexto } from './nomeMatch.js';
 import { propagarDadosFatura } from './faturaPropagacao.js';
+import { armazenamento } from './armazenamento.js';
 
 // ---------------------------------------------------------------------------
 // "Upload de faturas avulsas, sem planilha" -- ver migration-18 pro desenho
@@ -74,7 +75,7 @@ export async function associarPendentesAoCliente(clienteId, nomeCliente, usuario
     if (!pendencia) return null;
 
     const novoCaminho = `${clienteId}/${Date.now()}-${pendencia.arquivo.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-    const { error: moveError } = await supabase.storage.from(BUCKET).move(pendencia.pdf_path, novoCaminho);
+    const { error: moveError } = await armazenamento.from(BUCKET).move(pendencia.pdf_path, novoCaminho);
     if (moveError) {
       console.error('[faturasPendentes] falha ao mover PDF pendente pro cliente:', moveError.message);
       return null;

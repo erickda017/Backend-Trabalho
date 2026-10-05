@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { supabase, BUCKET, CHAT_BUCKET, AVATAR_BUCKET } from '../lib/supabase.js';
+import { armazenamento } from '../lib/armazenamento.js';
 
 const router = Router();
 
@@ -105,7 +106,7 @@ router.get('/:bucketApelido/*', async (req, res) => {
     // TTL curto (60s) -- só usada internamente aqui, pelo próprio backend,
     // pra baixar o arquivo do Storage e repassar; não é exposta ao cliente
     // em nenhum momento, então não precisa dos 10min do TTL padrão.
-    const { data, error } = await supabase.storage.from(bucketReal).createSignedUrl(path, 60);
+    const { data, error } = await armazenamento.from(bucketReal).createSignedUrl(path, 60);
     if (error || !data?.signedUrl) {
       console.error(`[arquivos] falha ao assinar (bucket=${bucketReal}, path=${path}):`, error?.message);
       return res.status(404).json({ error: 'arquivo não encontrado' });

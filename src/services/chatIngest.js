@@ -2,6 +2,7 @@ import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { supabase, CHAT_BUCKET } from '../lib/supabase.js';
 import { normalizarTelefone, normalizarVariantes } from '../lib/telefone.js';
+import { armazenamento } from '../lib/armazenamento.js';
 
 const logger = pino({ level: 'silent' });
 
@@ -71,7 +72,7 @@ async function baixarEGuardarMidia(sock, waMessage, { mediaMsg, mimetype, fileNa
   // WhatsApp já é único por sessão na prática, mas não vale depender só
   // disso pra isolamento entre operadores.
   const caminho = `${usuarioId}/${telefone}/${messageId}-${fileName}`;
-  const { error: uploadError } = await supabase.storage
+  const { error: uploadError } = await armazenamento
     .from(CHAT_BUCKET)
     .upload(caminho, buffer, { contentType: mimetype || 'application/octet-stream', upsert: true });
 

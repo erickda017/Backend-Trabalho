@@ -9,6 +9,7 @@ import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 import { limiteSensivel } from '../lib/rateLimit.js';
 import { lerPaginacao } from '../lib/paginacao.js';
+import { armazenamento } from '../lib/armazenamento.js';
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -234,7 +235,7 @@ router.post('/conversas/:id/mensagens', limiteSensivel, uploadAnexoComTratamento
       // de path traversal via nome de arquivo controlado por quem envia).
       const caminho = `${usuarioId}/${conversa.telefone}/${Date.now()}-${nomeArquivoSeguro(req.file.originalname, 'anexo')}`;
 
-      const { error: uploadError } = await supabase.storage
+      const { error: uploadError } = await armazenamento
         .from(CHAT_BUCKET)
         .upload(caminho, req.file.buffer, { contentType: req.file.mimetype, upsert: true });
       if (uploadError) throw uploadError;

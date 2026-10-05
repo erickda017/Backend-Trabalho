@@ -54,7 +54,10 @@ const SIGNED_URL_TTL_SEGUNDOS = Number(process.env.SIGNED_URL_TTL_SEGUNDOS || 60
 export async function gerarSignedUrl(bucket, path, ttlSegundos = SIGNED_URL_TTL_SEGUNDOS) {
   if (!path || typeof path !== 'string') return null;
   try {
-    const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, ttlSegundos);
+    // [2026-10] R2 primeiro, Supabase Storage como fallback (ver armazenamento.js).
+    // Import dinâmico: armazenamento.js importa este arquivo (evita ciclo).
+    const { armazenamento } = await import('./armazenamento.js');
+    const { data, error } = await armazenamento.from(bucket).createSignedUrl(path, ttlSegundos);
     if (error) {
       console.error(`[storage] erro ao assinar URL (bucket=${bucket}, path=${path}):`, error.message);
       return null;

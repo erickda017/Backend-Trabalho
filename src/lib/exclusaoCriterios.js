@@ -13,6 +13,7 @@
 // estas funções fora desse contexto.
 import { supabase, BUCKET, CHAT_BUCKET } from './supabase.js';
 import { rotuloSafra } from './safras.js';
+import { armazenamento } from './armazenamento.js';
 
 // PostgREST corta em 1000 linhas sem `.limit()` explícito (mesmo bug já
 // corrigido em outras rotas, ver clientes.routes.js/GET) -- aqui não pagina
@@ -41,7 +42,7 @@ async function removerDoStorageEmLotes(bucket, caminhos) {
   const falharam = [];
   for (let i = 0; i < caminhos.length; i += TAMANHO_LOTE) {
     const lote = caminhos.slice(i, i + TAMANHO_LOTE);
-    const { data, error } = await supabase.storage.from(bucket).remove(lote);
+    const { data, error } = await armazenamento.from(bucket).remove(lote);
     if (error) {
       console.error(`[exclusao] erro ao remover arquivos do bucket ${bucket}:`, error.message);
       falharam.push(...lote);

@@ -16,6 +16,7 @@
 // fatura já não é mais relevante (40 dias cobre folgadamente qualquer prazo
 // de vencimento + tempo de cobrança).
 import { supabase, BUCKET } from '../lib/supabase.js';
+import { armazenamento } from '../lib/armazenamento.js';
 
 const DIAS_RETENCAO = Number(process.env.RETENCAO_FATURAS_DIAS || 40);
 const PIX_BUCKET = process.env.SUPABASE_PIX_BUCKET || 'pix-extracoes';
@@ -32,7 +33,7 @@ async function removerDoStorageEmLotes(bucket, caminhos) {
   const TAMANHO_LOTE = 100;
   for (let i = 0; i < caminhos.length; i += TAMANHO_LOTE) {
     const lote = caminhos.slice(i, i + TAMANHO_LOTE);
-    const { error } = await supabase.storage.from(bucket).remove(lote);
+    const { error } = await armazenamento.from(bucket).remove(lote);
     if (error) console.error(`[limpeza] erro ao remover arquivos do bucket ${bucket}:`, error.message);
   }
 }

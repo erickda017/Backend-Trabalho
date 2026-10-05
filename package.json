@@ -8,6 +8,8 @@
     "test": "node --test src/lib/**/*.test.js src/services/**/*.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1146.0",
+    "@aws-sdk/s3-request-presigner": "^3.1146.0",
     "@hapi/boom": "^10.0.1",
     "@napi-rs/canvas": "^0.1.53",
     "@supabase/supabase-js": "^2.45.4",

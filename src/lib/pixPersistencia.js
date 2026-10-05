@@ -62,6 +62,8 @@ export function serializarExtracaoPix(linha) {
     valor: linha.valor,
     vencimento: linha.vencimento,
     linha_digitavel: linha.linha_digitavel,
+    codigo: linha.codigo ?? null,
+    nome: linha.nome ?? null,
     erro: linha.erro,
     criado_em: linha.criado_em,
     origem: linha.origem || null,
@@ -71,7 +73,14 @@ export function serializarExtracaoPix(linha) {
 // Grava a extração (auditoria/listagem em /pix) e, se um cliente foi
 // resolvido, propaga o Pix/valor/vencimento/linha digitável pra ele (e pro
 // grupo, se houver números vinculados -- ver faturaPropagacao.js).
-export async function persistirExtracaoPix({ usuarioId, arquivo, pixCopiaCola, valor, vencimento, linhaDigitavel, clienteId, origem }) {
+// Texto curto vindo do navegador (OCR do cabeçalho) -- corta lixo/excesso.
+const textoCurto = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 120) : null);
+
+// `codigo` (= OS da planilha do supervisor) e `nome` (titular lido no
+// cabeçalho do PDF) ficam gravados MESMO SEM cliente cadastrado -- é o que
+// permite o supervisor preencher a planilha dele com Pix extraído por
+// qualquer operador (ver GET /supervisor/extracoes-pix).
+export async function persistirExtracaoPix({ usuarioId, arquivo, pixCopiaCola, valor, vencimento, linhaDigitavel, clienteId, codigo, nome, origem }) {
   const nomeArquivo = typeof arquivo === 'string' && arquivo.trim() ? arquivo.trim() : 'boleto.pdf';
   const clienteResolvido = await resolverClientePix({ clienteId, arquivo: nomeArquivo, usuarioId });
 
@@ -86,6 +95,8 @@ export async function persistirExtracaoPix({ usuarioId, arquivo, pixCopiaCola, v
       valor: valor ?? null,
       vencimento: vencimento ?? null,
       linha_digitavel: linhaDigitavel ?? null,
+      codigo: textoCurto(codigo),
+      nome: textoCurto(nome),
     })
     .select('*, clientes(nome)')
     .single();

@@ -25,6 +25,7 @@ import { limiteSensivel } from '../lib/rateLimit.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 import { armazenamento } from '../lib/armazenamento.js';
+import { normalizarListaTelefones, MAX_TELEFONES_AVULSOS } from '../lib/telefonesAvulsos.js';
 
 const router = Router();
 
@@ -286,6 +287,7 @@ router.post('/', limiteSensivel, async (req, res) => {
     foto_path,
     foto_mimetype,
     foto_nome,
+    telefones,
   } = req.body || {};
 
   // [2026-09] Foto do lote (ver POST /anexo-foto acima e migration-26): só
@@ -326,6 +328,65 @@ router.post('/', limiteSensivel, async (req, res) => {
 
   if (!mensagemPrincipal) {
     return res.status(400).json({ error: 'mensagem é obrigatória' });
+  }
+
+  // [2026-10] "Colar números": lista de telefones soltos, sem cliente
+  // cadastrado (ver lib/telefonesAvulsos.js). Não passa por
+  // resolverClienteIds (não tem PDF/Pix/tag pra checar) e não se mistura
+  // com cliente_ids/tag_ids no mesmo lote. Modo "só Pix" não faz sentido
+  // aqui (número solto não tem Pix) e é recusado.
+  if (telefones !== undefined) {
+    if (enviarPix) return res.status(400).json({ error: 'disparo só com Pix não é possível pra números avulsos (eles não têm Pix cadastrado)' });
+    const { validos, invalidos, repetidos } = normalizarListaTelefones(telefones);
+    if (!validos.length) {
+      return res.status(400).json({ error: 'nenhum número válido na lista', numeros_invalidos_detalhe: invalidos.slice(0, 50) });
+    }
+    if (validos.length > MAX_TELEFONES_AVULSOS) {
+      return res.status(400).json({ error: `lista grande demais (${validos.length} números, limite ${MAX_TELEFONES_AVULSOS}). Divida em partes.` });
+    }
+
+    const { data: envio, error: envioError } = await supabase
+      .from('envios')
+      .insert({
+        usuario_id: usuarioId,
+        template_mensagem: mensagemPrincipal,
+        variacoes_mensagem: variacoes.length ? variacoes : [mensagemPrincipal],
+        status: agendado_para ? 'agendado' : 'pendente',
+        agendado_para: agendado_para || null,
+        intervalo_ms: intervalo_ms || null,
+        janela_ms: janela_ms || null,
+        enviar_pix: false,
+        campanha: campanhaDoEnvio,
+        foto_path: fotoPathValidado,
+        foto_mimetype: fotoPathValidado ? foto_mimetype || null : null,
+        foto_nome: fotoPathValidado ? foto_nome || null : null,
+      })
+      .select()
+      .single();
+    if (envioError) return res.status(500).json({ error: envioError.message });
+
+    // Lotes de 1000 por insert (payload menor, mesmo limite prático do PostgREST).
+    for (let i = 0; i < validos.length; i += 1000) {
+      const itens = validos.slice(i, i + 1000).map((telefone) => ({
+        envio_id: envio.id,
+        cliente_id: null,
+        telefone_usado: telefone,
+        status: 'pendente',
+      }));
+      const { error: itensError } = await supabase.from('envio_itens').insert(itens);
+      if (itensError) {
+        // Não deixa lote pela metade: apaga o envio (itens caem junto, on delete cascade).
+        await supabase.from('envios').delete().eq('id', envio.id).eq('usuario_id', usuarioId);
+        return res.status(500).json({ error: itensError.message });
+      }
+    }
+
+    return res.status(201).json({
+      ...montarEnvioResumo(envio, { total: validos.length, enviados: 0, entregues: 0, lidos: 0, falhas: 0, numeros_invalidos: 0, pendentes: validos.length, cancelados: 0 }),
+      ignorados_invalidos: invalidos.length,
+      ignorados_invalidos_detalhe: invalidos.slice(0, 50),
+      ignorados_repetidos: repetidos,
+    });
   }
 
   let resolucao;
@@ -582,7 +643,6 @@ router.get('/:id/itens', async (req, res) => {
       .or(`nome.ilike.%${buscaEscapada}%,telefone.ilike.%${buscaEscapada}%`);
     if (buscaError) return res.status(500).json({ error: buscaError.message });
     clienteIdsFiltrados = (clientesEncontrados || []).map((c) => c.id);
-    if (!clienteIdsFiltrados.length) return res.json([]);
   }
 
   let query = supabase
@@ -598,7 +658,16 @@ router.get('/:id/itens', async (req, res) => {
   if (filtro === 'entregue') query = query.in('status_entrega', ['entregue', 'lido']);
   else if (filtro === 'lido') query = query.eq('status_entrega', 'lido');
   else if (filtro && filtro !== 'todos') query = query.eq('status', filtro);
-  if (clienteIdsFiltrados) query = query.in('cliente_id', clienteIdsFiltrados);
+  // [2026-10] Itens avulsos (sem cliente, ver POST / com `telefones`) são
+  // achados pelo número em telefone_usado.
+  if (clienteIdsFiltrados) {
+    const digitos = String(busca).replace(/\D/g, '');
+    const filtros = [];
+    if (clienteIdsFiltrados.length) filtros.push(`cliente_id.in.(${clienteIdsFiltrados.join(',')})`);
+    if (digitos) filtros.push(`telefone_usado.ilike.%${digitos}%`);
+    if (!filtros.length) return res.json([]);
+    query = query.or(filtros.join(','));
+  }
 
   const { data, error } = await query.range(from, to);
   if (error) return res.status(500).json({ error: error.message });

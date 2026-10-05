@@ -127,7 +127,14 @@ async function atualizarStatusEnviado(itemId, dadosAtualizacao, tentativas = 3) 
 }
 
 async function enviarItem(item, envio, usuarioId) {
-  const cliente = item.clientes;
+  // [2026-10] Item avulso ("Colar números", ver lib/telefonesAvulsos.js):
+  // sem cliente, só o número em telefone_usado. Vira um "cliente" mínimo
+  // -- {{nome}}/{{valor}}/{{pix}} saem vazios, sem PDF.
+  const cliente = item.clientes ?? {
+    nome: '',
+    telefone: item.telefone_usado,
+    campanha: envio.campanha || 'cobranca',
+  };
   const templateDoItem = item.mensagem_override || escolherTemplate(envio);
   let mensagem = montarMensagem(templateDoItem, cliente);
 

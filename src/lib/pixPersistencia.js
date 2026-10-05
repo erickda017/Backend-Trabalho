@@ -1,4 +1,5 @@
 import { supabase } from './supabase.js';
+import { buscarTodos } from './buscarTodos.js';
 import { escaparFiltroPostgrest } from './filtros.js';
 import { propagarDadosFatura } from './faturaPropagacao.js';
 import { normalizarNomeArquivo, normalizarTexto } from './nomeMatch.js';
@@ -136,11 +137,14 @@ export async function associarPixPendenteAoCliente(clienteId, nomeCliente, usuar
     const alvo = normalizarTexto(nomeCliente).replace(/\s+/g, ' ').trim();
     if (!alvo || alvo.length < 3) return null;
 
-    const { data: pendentes, error } = await supabase
-      .from('pix_extracoes')
-      .select('id, arquivo, pix_code, valor, vencimento, linha_digitavel')
-      .eq('usuario_id', usuarioId)
-      .is('cliente_id', null);
+    const { data: pendentes, error } = await buscarTodos(() =>
+      supabase
+        .from('pix_extracoes')
+        .select('id, arquivo, pix_code, valor, vencimento, linha_digitavel')
+        .eq('usuario_id', usuarioId)
+        .is('cliente_id', null)
+        .order('id', { ascending: true })
+    );
     if (error) throw error;
 
     const candidatos = (pendentes || []).map((p) => ({ ...p, nomeNormalizado: normalizarNomeArquivo(p.arquivo) }));

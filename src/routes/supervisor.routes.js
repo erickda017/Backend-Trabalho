@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { supabase, urlsProxyArquivo } from '../lib/supabase.js';
 import { lerPaginacao } from '../lib/paginacao.js';
+import { buscarTodos } from '../lib/buscarTodos.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
 import { achatarTags } from '../lib/achatarTags.js';
 import { agregarContadores as agregarContadoresBase } from '../lib/agregarContadores.js';
@@ -367,11 +368,13 @@ router.get('/dashboard', async (req, res) => {
 // prima já filtrada (sem PDF/tags/valor -- não é preciso pra casar por nome).
 router.get('/indice-pix', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('clientes')
-      .select('id, nome, telefone, pix_code, usuario_id')
-      .not('pix_code', 'is', null)
-      .limit(20000);
+    const { data, error } = await buscarTodos(() =>
+      supabase
+        .from('clientes')
+        .select('id, nome, telefone, pix_code, usuario_id')
+        .not('pix_code', 'is', null)
+        .order('id', { ascending: true })
+    );
     if (error) throw error;
     const operadores = await mapaOperadores();
     res.json((data || []).map((c) => ({ ...c, operador: operadores.get(c.usuario_id) || null })));
@@ -387,13 +390,15 @@ router.get('/indice-pix', async (req, res) => {
 // Mais recente primeiro: se a mesma fatura foi extraída 2x, vale a última.
 router.get('/extracoes-pix', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('pix_extracoes')
-      .select('arquivo, nome, codigo, vencimento, pix_code, usuario_id, criado_em')
-      .not('codigo', 'is', null)
-      .not('pix_code', 'is', null)
-      .order('criado_em', { ascending: false })
-      .limit(20000);
+    const { data, error } = await buscarTodos(() =>
+      supabase
+        .from('pix_extracoes')
+        .select('arquivo, nome, codigo, vencimento, pix_code, usuario_id, criado_em')
+        .not('codigo', 'is', null)
+        .not('pix_code', 'is', null)
+        .order('criado_em', { ascending: false })
+        .order('id', { ascending: true })
+    );
     if (error) throw error;
     const operadores = await mapaOperadores();
     res.json((data || []).map((e) => ({ ...e, operador: operadores.get(e.usuario_id) || null })));

@@ -8,6 +8,7 @@ import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 import { limiteImportacaoArquivo } from '../lib/rateLimit.js';
 import { armazenamento } from '../lib/armazenamento.js';
+import { buscarTodos } from '../lib/buscarTodos.js';
 
 // ---------------------------------------------------------------------------
 // "Upload de faturas avulsas, sem depender de planilha" -- pra quando o
@@ -24,16 +25,27 @@ import { armazenamento } from '../lib/armazenamento.js';
 // ---------------------------------------------------------------------------
 const router = Router();
 
+// [2026-10] Teto por arquivo configurável (antes 20MB fixo -- fatura
+// escaneada em alta resolução passava disso e era recusada no meio de um
+// lote). Quantidade de arquivos não tem teto: o front manda 1 por
+// requisição, em sequência. O teto real acaba sendo o do Storage (Supabase
+// free = 50MB por objeto; R2 não limita nesse patamar) e a RAM do Render,
+// já que o arquivo passa pela memória -- por isso ainda existe um número.
+const FATURA_AVULSA_MAX_MB = Number(process.env.FATURA_AVULSA_MAX_MB) || 100;
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 },
+  limits: { fileSize: FATURA_AVULSA_MAX_MB * 1024 * 1024, files: 1 },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype !== 'application/pdf') return cb(new Error('Envie um arquivo PDF'));
+    // Alguns navegadores/SOs mandam PDF como application/octet-stream --
+    // aceita também pela extensão.
+    const ehPdf = file.mimetype === 'application/pdf' || /\.pdf$/i.test(file.originalname || '');
+    if (!ehPdf) return cb(new Error('Envie um arquivo PDF'));
     cb(null, true);
   },
 });
 
-const uploadPdfComTratamentoDeErro = comTratamentoDeErroUpload(upload.single('pdf'), { limiteMb: 20, logPrefixo: '[faturas-avulsas]' });
+const uploadPdfComTratamentoDeErro = comTratamentoDeErroUpload(upload.single('pdf'), { limiteMb: FATURA_AVULSA_MAX_MB, logPrefixo: '[faturas-avulsas]' });
 
 // POST /api/faturas/avulsas -- 1 PDF por requisição (o front chama uma vez
 // por arquivo, igual ao restante dos fluxos de upload deste projeto).
@@ -62,11 +74,16 @@ router.post('/avulsas', limiteImportacaoArquivo, uploadPdfComTratamentoDeErro, a
     // cliente de cobrança virava candidato aqui também -- 2+ candidatos faz
     // `casarClientePorArquivo` desistir (ambíguo, ver lib/nomeMatch.js), e o
     // PDF ficava pendente mesmo com o cliente certo já cadastrado.
-    const { data: clientes, error: clientesError } = await supabase
-      .from('clientes')
-      .select('id, nome')
-      .eq('usuario_id', usuarioId)
-      .eq('campanha', 'cobranca');
+    // [2026-10] buscarTodos: sem paginar, carteira com +1000 clientes só
+    // casava contra os 1000 primeiros (corte do PostgREST).
+    const { data: clientes, error: clientesError } = await buscarTodos(() =>
+      supabase
+        .from('clientes')
+        .select('id, nome')
+        .eq('usuario_id', usuarioId)
+        .eq('campanha', 'cobranca')
+        .order('id', { ascending: true })
+    );
     if (clientesError) return res.status(500).json({ error: clientesError.message });
 
     const clienteCasado = casarClientePorArquivo(nomeOriginal, clientes || []);

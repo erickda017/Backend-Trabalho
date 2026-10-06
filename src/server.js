@@ -29,6 +29,7 @@ import faturasPendentesRoutes from './routes/faturasPendentes.routes.js';
 import safrasRoutes from './routes/safras.routes.js';
 import qualidadeRoutes from './routes/qualidade.routes.js';
 import ativacaoChipRoutes from './routes/ativacaoChip.routes.js';
+import integracaoPlanilhaRoutes from './routes/integracaoPlanilha.routes.js';
 import { iniciarConsolidacaoSafras } from './lib/safras.js';
 
 dotenv.config();
@@ -135,6 +136,8 @@ app.use('/api/faturas', requireAuth, faturasPendentesRoutes);
 app.use('/api/safras', requireAuth, safrasRoutes);
 app.use('/api/qualidade', requireAuth, qualidadeRoutes);
 app.use('/api/ativacao-chip', requireAuth, ativacaoChipRoutes);
+// [2026-10] Botão "Atualizar Pix na planilha" (operador e supervisor) -- ver lib/planilhaIntegracao.js.
+app.use('/api/integracao/planilha', requireAuth, integracaoPlanilhaRoutes);
 
 // Handler de erro global -- sem isso, erros como multer (arquivo grande demais, tipo
 // errado) ou qualquer exceção síncrona em uma rota caem no handler padrão do Express,

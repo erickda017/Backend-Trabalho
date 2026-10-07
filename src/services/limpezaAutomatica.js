@@ -18,7 +18,10 @@
 import { supabase, BUCKET } from '../lib/supabase.js';
 import { armazenamento } from '../lib/armazenamento.js';
 
-const DIAS_RETENCAO = Number(process.env.RETENCAO_FATURAS_DIAS || 40);
+// [2026-10] Piso de 7 dias: valor 0/negativo/inválido na env var apagaria
+// TODOS os PDFs na próxima rodada.
+const diasEnv = Number(process.env.RETENCAO_FATURAS_DIAS || 40);
+const DIAS_RETENCAO = Number.isFinite(diasEnv) && diasEnv >= 7 ? diasEnv : 40;
 const PIX_BUCKET = process.env.SUPABASE_PIX_BUCKET || 'pix-extracoes';
 const INTERVALO_MS = 24 * 60 * 60 * 1000; // 1x por dia
 

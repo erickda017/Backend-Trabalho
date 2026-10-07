@@ -1,4 +1,5 @@
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
+import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import pino from 'pino';
 import { supabase, CHAT_BUCKET } from '../lib/supabase.js';
 import { normalizarTelefone, normalizarVariantes } from '../lib/telefone.js';
@@ -60,7 +61,14 @@ function interpretarConteudo(content) {
   return null; // reação, enquete, mensagem apagada, protocolo etc -- ignora
 }
 
+// [2026-10] SEGURANÇA: remetente do WhatsApp é externo (não autenticado).
+// Teto de tamanho ANTES de baixar pra RAM -- sem isso um vídeo/documento
+// enorme derrubava o processo (OOM) de todos os operadores.
+const MIDIA_MAX_BYTES = Number(process.env.CHAT_MIDIA_MAX_MB || 25) * 1024 * 1024;
+
 async function baixarEGuardarMidia(sock, waMessage, { mediaMsg, mimetype, fileName }, telefone, messageId, usuarioId) {
+  const declarado = Number(Object.values(mediaMsg)[0]?.fileLength || 0);
+  if (declarado > MIDIA_MAX_BYTES) throw new Error(`mídia grande demais (${Math.round(declarado / 1048576)} MB), não baixada`);
   const buffer = await downloadMediaMessage(
     { message: mediaMsg, key: waMessage.key },
     'buffer',
@@ -72,7 +80,11 @@ async function baixarEGuardarMidia(sock, waMessage, { mediaMsg, mimetype, fileNa
   // resto do sistema (mesmo padrão de chat.routes.js) -- messageId do
   // WhatsApp já é único por sessão na prática, mas não vale depender só
   // disso pra isolamento entre operadores.
-  const caminho = `${usuarioId}/${telefone}/${messageId}-${fileName}`;
+  if (buffer.length > MIDIA_MAX_BYTES) throw new Error('mídia grande demais, não gravada');
+  // [2026-10] SEGURANÇA: nome do documento e messageId vêm do remetente --
+  // sanitizados só no PATH ("../" escapava da pasta). O nome original segue
+  // em anexoNome, só pra exibir.
+  const caminho = `${usuarioId}/${String(telefone).replace(/\D/g, '') || 'sem-numero'}/${nomeArquivoSeguro(messageId, 'msg')}-${nomeArquivoSeguro(fileName, 'arquivo')}`;
   const { error: uploadError } = await armazenamento
     .from(CHAT_BUCKET)
     .upload(caminho, buffer, { contentType: mimetype || 'application/octet-stream', upsert: true });

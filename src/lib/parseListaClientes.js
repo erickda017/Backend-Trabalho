@@ -59,7 +59,14 @@ function normalizarSegmento(s) {
   let out = s.trim();
   const idxIgual = out.indexOf(' = ');
   if (idxIgual > 0) out = out.slice(0, idxIgual).trim();
-  out = out.replace(/\s*\([^)]*\)\s*$/, '').trim();
+  // [2026-10] Era out.replace(/\s*\([^)]*\)\s*$/, ''): com texto colado
+  // cheio de "(" sem ")" a regex ficava quadrática e travava o servidor
+  // inteiro. Mesmo efeito, linear: tira o último "(...)" do fim.
+  if (out.endsWith(')')) {
+    const abre = out.lastIndexOf('(');
+    if (abre >= 0 && !out.slice(abre + 1, -1).includes(')')) out = out.slice(0, abre);
+  }
+  out = out.trim();
   return out;
 }
 

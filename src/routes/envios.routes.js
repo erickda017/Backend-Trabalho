@@ -24,7 +24,7 @@ import { agregarContadores } from '../lib/agregarContadores.js';
 import { limiteSensivel } from '../lib/rateLimit.js';
 import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
-import { armazenamento } from '../lib/armazenamento.js';
+import { armazenamento, pathArmazenamentoValido } from '../lib/armazenamento.js';
 import { normalizarListaTelefones, MAX_TELEFONES_AVULSOS } from '../lib/telefonesAvulsos.js';
 
 const router = Router();
@@ -296,7 +296,7 @@ router.post('/', limiteSensivel, async (req, res) => {
   // outro operador colado no corpo por engano/má-fé) nunca é aceito aqui.
   let fotoPathValidado = null;
   if (foto_path !== undefined && foto_path !== null) {
-    if (typeof foto_path !== 'string' || !foto_path.startsWith(`${usuarioId}/`)) {
+    if (typeof foto_path !== 'string' || !foto_path.startsWith(`${usuarioId}/`) || !pathArmazenamentoValido(foto_path)) {
       return res.status(400).json({ error: 'foto_path inválido' });
     }
     fotoPathValidado = foto_path;

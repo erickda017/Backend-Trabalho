@@ -1,3 +1,8 @@
 node_modules/
 *.log
 relatorio-migracao-r2-*.json
+
+# Segredos: nunca versionar (repo público)
+.env
+.env.*
+!.env.example

@@ -45,8 +45,8 @@ alter table estrategia_config enable row level security;
 alter table pix_extracoes enable row level security;
 
 drop policy if exists "dono ve suas pix_extracoes" on pix_extracoes;
-create policy "dono ve suas pix_extracoes" on pix_extracoes for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve suas pix_extracoes" on pix_extracoes for select to authenticated
+  using (usuario_id = auth.uid());
 
 -- PRIVADO: mesmo motivo dos buckets faturas/chat-midia -- pode conter PDF com
 -- dados pessoais de cliente. Leitura só via signed URL (ver src/lib/supabase.js).

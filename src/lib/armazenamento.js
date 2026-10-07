@@ -34,15 +34,27 @@ import { supabase } from './supabase.js';
 // Teto da URL assinada, mesmo que alguém peça mais (Baileys/proxy usam 60-600s).
 const TTL_MAXIMO_SEGUNDOS = 3600;
 
-// Chave segura: sem "..", sem barra inicial, sem caractere de controle.
-// (No S3 ".." não sobe diretório, mas um path assim nunca é legítimo aqui.)
-export function chaveR2(bucket, path) {
+// [2026-10] SEGURANÇA (auditoria): path de arquivo vem de URL (proxy
+// /api/arquivos), de body (foto_path) e de remetente do WhatsApp (nome do
+// documento). Antes só o ramo R2 validava -- e o erro caía no fallback do
+// Supabase legado, que monta a URL sem encode: "MEU_ID/../OUTRO/x.pdf",
+// "a/%2e%2e/b" ou "a\\..\\b" viravam travessia e o backend assinava (com a
+// service_role) arquivo de outro operador/bucket. Agora TODA operação valida
+// aqui antes de escolher R2 ou legado.
+// Recusa: vazio, barra inicial, barra invertida, caractere de controle e
+// segmento "."/".." em qualquer forma que o parser de URL resolve (%2e).
+const SEGMENTO_PONTO = /^(?:\.|%2e){1,2}$/i;
+export function pathArmazenamentoValido(path) {
   const p = String(path ?? '');
-  if (!p || p.startsWith('/') || p.split('/').some((seg) => seg === '..' || seg === '.') || /[\u0000-\u001f]/.test(p)) {
-    throw new Error(`path de arquivo inválido: ${p.slice(0, 80)}`);
-  }
-  return `${bucket}/${p}`;
+  return Boolean(p) && p.length <= 1024 && !p.startsWith('/') && !/[\\\u0000-\u001f\u007f]/.test(p) && !p.split('/').some((s) => SEGMENTO_PONTO.test(s));
 }
+
+export function chaveR2(bucket, path) {
+  if (!pathArmazenamentoValido(path)) throw new Error(`path de arquivo inválido: ${String(path ?? '').slice(0, 80)}`);
+  return `${bucket}/${path}`;
+}
+
+const pathInvalido = () => ({ data: null, error: new Error('path de arquivo inválido') });
 
 // Tipos que o navegador EXECUTA quando o front abre o arquivo como blob: na
 // origem do app (HTML/SVG/XML com script). Mimetype vem do cliente (multer /
@@ -84,6 +96,7 @@ export function criarArmazenamento({ s3, bucketR2, legado }) {
 
     return {
       async upload(path, corpo, { contentType, upsert } = {}) {
+        if (!pathArmazenamentoValido(path)) return pathInvalido();
         if (!r2) return leg.upload(path, corpo, { contentType: tipoSeguro(contentType), upsert });
         try {
           const chave = chaveR2(bucket, path);
@@ -102,6 +115,7 @@ export function criarArmazenamento({ s3, bucketR2, legado }) {
       // { data: Blob } como o supabase-js. Erro do R2 (fora do ar, 403...) não
       // derruba a leitura de arquivo ainda não migrado: cai no legado.
       async download(path) {
+        if (!pathArmazenamentoValido(path)) return pathInvalido();
         if (r2) {
           try {
             const obj = await r2.s3.send(new GetObjectCommand({ Bucket: r2.bucketR2, Key: chaveR2(bucket, path) }));
@@ -119,6 +133,7 @@ export function criarArmazenamento({ s3, bucketR2, legado }) {
       },
 
       async createSignedUrl(path, ttlSegundos) {
+        if (!pathArmazenamentoValido(path)) return pathInvalido();
         const ttl = Math.max(1, Math.min(Number(ttlSegundos) || 600, TTL_MAXIMO_SEGUNDOS));
         if (r2) {
           try {
@@ -142,7 +157,9 @@ export function criarArmazenamento({ s3, bucketR2, legado }) {
       // achou antes; no legado, o que ele confirmar. Erro em qualquer lado =
       // erro (melhor não confirmar do que confirmar errado).
       async remove(paths) {
-        const lista = (paths || []).filter(Boolean);
+        // Path inválido fica fora de `data` (quem chama trata como "não
+        // removido"); lançar erro derrubaria o lote inteiro da exclusão.
+        const lista = (paths || []).filter(Boolean).filter((p) => pathArmazenamentoValido(p) || (console.error('[armazenamento] remove ignorou path inválido'), false));
         if (!r2) return leg.remove(lista);
         if (!lista.length) return { data: [], error: null };
         const removidos = new Set();
@@ -170,6 +187,7 @@ export function criarArmazenamento({ s3, bucketR2, legado }) {
       // houver). Ainda só no legado: move lá mesmo (segue legível pelo
       // fallback; o script de migração leva depois).
       async move(de, para) {
+        if (!pathArmazenamentoValido(de) || !pathArmazenamentoValido(para)) return pathInvalido();
         if (r2) {
           try {
             const origem = chaveR2(bucket, de);
@@ -194,6 +212,7 @@ export function criarArmazenamento({ s3, bucketR2, legado }) {
       // Só o diagnóstico do painel de exclusão usa list() (1 nível, até
       // 1000 itens): junta o que houver no R2 e no legado.
       async list(prefixo = '', opcoes) {
+        if (prefixo && !pathArmazenamentoValido(prefixo)) return pathInvalido();
         const nomes = new Map();
         if (r2) {
           try {

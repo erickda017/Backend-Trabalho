@@ -33,7 +33,7 @@ async function extracoesComCodigo() {
 
 // POST /api/integracao/planilha/atualizar
 router.post('/atualizar', limiteSensivel, (req, res) => {
-  if (tarefaAtual?.status === 'rodando') return res.json({ tarefa: tarefaAtual, jaEmAndamento: true });
+  if (tarefaAtual?.status === 'rodando') return res.json({ tarefa: visaoDaTarefa(tarefaAtual, req.user), jaEmAndamento: true });
 
   const tarefa = novaTarefa(req.user.id);
   tarefaAtual = tarefa;
@@ -49,9 +49,21 @@ router.post('/atualizar', limiteSensivel, (req, res) => {
   res.status(202).json({ tarefa, jaEmAndamento: false });
 });
 
+// [2026-10] SEGURANÇA (auditoria): o resumo traz linhas da planilha oficial
+// (nome, OS, vencimento de clientes de TODOS os operadores). Só quem
+// iniciou a tarefa e o supervisor veem esse detalhe; os outros veem só o
+// progresso e os totais.
+function visaoDaTarefa(tarefa, user) {
+  if (!tarefa) return null;
+  if (user.role === 'supervisor' || tarefa.iniciadoPor === user.id) return tarefa;
+  const { iniciadoPor, resumo, ...resto } = tarefa;
+  const totais = resumo ? Object.fromEntries(Object.entries(resumo).filter(([, v]) => typeof v === 'number')) : null;
+  return { ...resto, resumo: totais, iniciadoPorOutro: true };
+}
+
 // GET /api/integracao/planilha/status -- a tarefa atual (ou a última).
 router.get('/status', (req, res) => {
-  res.json({ tarefa: tarefaAtual });
+  res.json({ tarefa: visaoDaTarefa(tarefaAtual, req.user) });
 });
 
 export default router;

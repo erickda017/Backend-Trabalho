@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { S3Client } from '@aws-sdk/client-s3';
-import { criarArmazenamento, chaveR2, tipoSeguro } from './armazenamento.js';
+import { criarArmazenamento, chaveR2, tipoSeguro, pathArmazenamentoValido } from './armazenamento.js';
 
 // S3 falso: guarda objetos num Map e responde aos comandos pelo nome da classe.
 function s3Falso() {
@@ -164,4 +164,19 @@ test('R2 fora do ar: arquivo antigo segue abrindo pelo Supabase e o erro não va
   const up = await a.from('faturas').upload('c/novo.pdf', Buffer.from('n'));
   assert.equal(up.error.message, 'falha no armazenamento de arquivos');
   assert.ok(!up.error.message.includes('conta-secreta'));
+});
+
+// [2026-10] Auditoria: path com "..", %2e%2e, barra invertida etc. nunca
+// chega no R2 nem no Supabase legado (o legado resolvia "..").
+test('path inválido é recusado antes do R2 e do legado', async () => {
+  let chamouLegado = false;
+  const legado = { from: () => new Proxy({}, { get: () => async () => { chamouLegado = true; return { data: {}, error: null }; } }) };
+  const arm = criarArmazenamento({ s3: null, bucketR2: null, legado });
+  for (const p of ['a/../b', 'a/%2e%2e/b', 'a/.%2E/b', 'a\\..\\b', '/a', 'a/\u0000', '..']) {
+    assert.equal(pathArmazenamentoValido(p), false, p);
+    const r = await arm.from('faturas').createSignedUrl(p, 60);
+    assert.ok(r.error, p);
+  }
+  assert.equal(chamouLegado, false);
+  for (const p of ['uuid/123-Fatura (1) ç.pdf', 'uuid/avatar', 'pendentes/u/x.pdf']) assert.equal(pathArmazenamentoValido(p), true, p);
 });

@@ -100,42 +100,42 @@ update storage.buckets set public = false where id = 'pix-extracoes';
 --    outro usuário, porque o Postgres barra de qualquer forma pra quem
 --    acessar com JWT de usuário em vez de service_role).
 drop policy if exists "dono ve seus clientes" on clientes;
-create policy "dono ve seus clientes" on clientes for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve seus clientes" on clientes for select to authenticated
+  using (usuario_id = auth.uid());
 
 drop policy if exists "dono ve seus envios" on envios;
-create policy "dono ve seus envios" on envios for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve seus envios" on envios for select to authenticated
+  using (usuario_id = auth.uid());
 
 drop policy if exists "dono ve seus envio_itens" on envio_itens;
-create policy "dono ve seus envio_itens" on envio_itens for all to authenticated
+create policy "dono ve seus envio_itens" on envio_itens for select to authenticated
   using (envio_id in (select id from envios where usuario_id = auth.uid()));
 
 drop policy if exists "dono ve suas conversas" on conversas;
 drop policy if exists "usuarios autenticados leem conversas" on conversas; -- policy antiga (single-tenant), substituída
-create policy "dono ve suas conversas" on conversas for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve suas conversas" on conversas for select to authenticated
+  using (usuario_id = auth.uid());
 
 drop policy if exists "dono ve suas mensagens" on mensagens;
 drop policy if exists "usuarios autenticados leem mensagens" on mensagens; -- policy antiga (single-tenant), substituída
-create policy "dono ve suas mensagens" on mensagens for all to authenticated
+create policy "dono ve suas mensagens" on mensagens for select to authenticated
   using (conversa_id in (select id from conversas where usuario_id = auth.uid()));
 
 drop policy if exists "dono ve suas tags" on tags;
-create policy "dono ve suas tags" on tags for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve suas tags" on tags for select to authenticated
+  using (usuario_id = auth.uid());
 
 drop policy if exists "dono ve suas cliente_tags" on cliente_tags;
-create policy "dono ve suas cliente_tags" on cliente_tags for all to authenticated
+create policy "dono ve suas cliente_tags" on cliente_tags for select to authenticated
   using (cliente_id in (select id from clientes where usuario_id = auth.uid()));
 
 drop policy if exists "dono ve suas respostas_rapidas" on respostas_rapidas;
-create policy "dono ve suas respostas_rapidas" on respostas_rapidas for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve suas respostas_rapidas" on respostas_rapidas for select to authenticated
+  using (usuario_id = auth.uid());
 
 drop policy if exists "dono ve suas pix_extracoes" on pix_extracoes;
-create policy "dono ve suas pix_extracoes" on pix_extracoes for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve suas pix_extracoes" on pix_extracoes for select to authenticated
+  using (usuario_id = auth.uid());
 
 -- whatsapp_sessions e auditoria_exclusoes continuam SEM policy (só
 -- service_role acessa) -- não faz sentido nenhum usuário ler credenciais

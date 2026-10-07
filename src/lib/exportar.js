@@ -1,5 +1,11 @@
 import XLSX from 'xlsx';
 
+// [2026-10] "+" e "-" também abrem fórmula no Excel ("+cmd|...", "-2+3").
+// Número puro (valor negativo legítimo, "-150,50") não é tocado.
+export function pareceFormula(s) {
+  return /^[=@\t\r]/.test(s) || (/^[+-]/.test(s) && !/^[+-]?\d[\d.,\s]*$/.test(s));
+}
+
 function paraCsv(linhas) {
   if (!linhas.length) return '';
   const colunas = Object.keys(linhas[0]);
@@ -19,7 +25,7 @@ function paraCsv(linhas) {
     // a leitura como texto literal. "+"/"-" isolados ficam de fora de propósito
     // (alta taxa de falso positivo em nomes/valores de negócio legítimos, ex:
     // "-Empresa Beta" ou um valor negativo que já chegou como texto).
-    if (/^[=@\t\r]/.test(s)) s = `'${s}`;
+    if (pareceFormula(s)) s = `'${s}`;
     return /[",\n;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const cabecalho = colunas.join(';');
@@ -33,7 +39,7 @@ function neutralizarFormulas(linhas) {
   return linhas.map((linha) => {
     const nova = {};
     for (const [k, v] of Object.entries(linha)) {
-      if (typeof v === 'string' && /^[=@\t\r]/.test(v)) {
+      if (typeof v === 'string' && pareceFormula(v)) {
         nova[k] = `'${v}`;
       } else {
         nova[k] = v;

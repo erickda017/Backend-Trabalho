@@ -41,7 +41,7 @@ create index if not exists faturas_pendentes_arquivo_normalizado_idx on faturas_
 alter table faturas_pendentes enable row level security;
 
 drop policy if exists "dono ve suas faturas pendentes" on faturas_pendentes;
-create policy "dono ve suas faturas pendentes" on faturas_pendentes for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve suas faturas pendentes" on faturas_pendentes for select to authenticated
+  using (usuario_id = auth.uid());
 -- (RLS aqui é só postura padrão do projeto -- o backend usa a service_role
 -- key e ignora RLS, ver decisão equivalente documentada em CONTEXTO.md.)

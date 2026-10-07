@@ -81,3 +81,43 @@ PDF para `https://processo-de-pdf.erickramiro2010.workers.dev` — um domínio
 pessoal, fora do controle da organização. Isso não foi alterado nesta rodada
 a pedido explícito; veja a seção "Migrando o Worker de OCR" (mensagem
 separada) para o passo a passo de mover isso para um domínio próprio.
+
+## [2026-10] Auditoria completa
+
+Detalhes do que foi corrigido em `Front-Trabalho/CONTEXTO.md` ("Bugs
+corrigidos", entrada "Auditoria de segurança completa"). Resumo do modelo:
+
+- Auth é `Authorization: Bearer <JWT Supabase>`, não cookie. Sem cookie não há
+  CSRF; CORS com origem exata (`FRONTEND_ORIGIN`) e `credentials: false`.
+  Não migrar para cookie `SameSite=None` sem também implementar token CSRF.
+- Todo path de arquivo passa por `pathArmazenamentoValido()` antes de chegar
+  no R2 ou no Supabase Storage.
+- Proxy de arquivos só devolve tipos que o navegador não executa.
+- Policies RLS são só leitura (`migration-28`); escrita só pelo backend.
+
+### Checklist de painel (fazer à mão)
+
+Render:
+- `FRONTEND_ORIGIN` = domínio exato da Vercel (https, sem barra no fim, sem `*`).
+  Sem ela o backend novo NÃO sobe (fail-fast).
+- `SUPABASE_SERVICE_ROLE_KEY`, chaves R2 e `PLANILHA_CHAVE_INTEGRACAO`: só aqui,
+  nunca no front. Trocar (rotacionar) se alguma já apareceu em print/log.
+- Depois de migrar tudo pro R2: `STORAGE_LEGADO_SUPABASE=false`.
+
+Supabase:
+- Rodar `migration-28-seguranca-auditoria.sql` no SQL Editor.
+- Authentication → desligar "Allow new users to sign up" e criar operadores
+  por convite (Users → Invite).
+- Advisors → Security: zerar os avisos.
+
+Vercel:
+- `VITE_*` só com valores públicos (URL do Supabase, anon/publishable key, URL da API).
+- Deployment Protection ligado para Previews.
+
+GitHub:
+- Tornar `Front-Trabalho` e `Backend-Trabalho` privados: o histórico do Front
+  ainda contém planilhas com dados de clientes (commit `87ef245`).
+
+Cloudflare (Worker de OCR):
+- Restringir CORS do Worker ao domínio da Vercel e exigir o JWT do Supabase
+  (validar com `SUPABASE_URL/auth/v1/user`) ou um token assinado pelo backend.

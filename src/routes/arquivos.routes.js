@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { supabase, BUCKET, CHAT_BUCKET, AVATAR_BUCKET } from '../lib/supabase.js';
-import { armazenamento } from '../lib/armazenamento.js';
+import { armazenamento, pathArmazenamentoValido } from '../lib/armazenamento.js';
 
 const router = Router();
 
@@ -75,6 +75,14 @@ async function caminhoPertenceAoUsuario(bucketApelido, path, usuarioId) {
   return Boolean(data);
 }
 
+// Lista branca: PDF, imagem raster, áudio, vídeo e texto puro. SVG fica de
+// fora (pode ter script). Qualquer outro tipo sai como octet-stream.
+const TIPOS_EXIBIVEIS = /^(application\/pdf|image\/(png|jpe?g|gif|webp|bmp|heic|heif)|audio\/[\w.+-]+|video\/[\w.+-]+|text\/plain)$/i;
+export function tipoExibivel(contentType) {
+  const base = String(contentType || '').split(';')[0].trim().toLowerCase();
+  return TIPOS_EXIBIVEIS.test(base) ? base : 'application/octet-stream';
+}
+
 router.get('/:bucketApelido/*', async (req, res) => {
   const bucketReal = BUCKETS_PERMITIDOS[req.params.bucketApelido];
   if (!bucketReal) {
@@ -89,6 +97,12 @@ router.get('/:bucketApelido/*', async (req, res) => {
   const path = req.params[0];
   if (!path) {
     return res.status(400).json({ error: 'path do arquivo ausente' });
+  }
+  // [2026-10] SEGURANÇA: a checagem de dono abaixo olha o 1º segmento; sem
+  // isto "MEU_ID/../OUTRO/x.pdf" (ou %2e%2e) passava nela e o Storage
+  // resolvia o "..". Vale pra supervisor também (não muda regra de dono).
+  if (!pathArmazenamentoValido(path)) {
+    return res.status(404).json({ error: 'arquivo não encontrado' });
   }
 
   // Supervisor já enxerga cliente/PDF de QUALQUER operador em outras rotas
@@ -117,11 +131,14 @@ router.get('/:bucketApelido/*', async (req, res) => {
       return res.status(respostaStorage.status || 502).json({ error: 'falha ao buscar arquivo no storage' });
     }
 
-    // Repassa o Content-Type original (Supabase já infere certo a partir da
-    // extensão no upload) -- o front decide o que fazer com o Blob (exibir
-    // inline como imagem, abrir como PDF, etc.) a partir dele.
-    const contentType = respostaStorage.headers.get('content-type');
-    if (contentType) res.setHeader('Content-Type', contentType);
+    // [2026-10] SEGURANÇA: o Content-Type gravado pode ter vindo de fora
+    // (remetente do WhatsApp, upload antigo). O front abre o Blob como blob:
+    // NA ORIGEM DO APP -- HTML/SVG ali roda script e lê o token do
+    // localStorage. Só tipos que o navegador não executa passam; o resto
+    // vira download binário. `nosniff` impede o navegador de "adivinhar".
+    res.setHeader('Content-Type', tipoExibivel(respostaStorage.headers.get('content-type')));
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
     const contentLength = respostaStorage.headers.get('content-length');
     if (contentLength) res.setHeader('Content-Length', contentLength);
 

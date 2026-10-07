@@ -96,15 +96,15 @@ alter table envios enable row level security;
 alter table envio_itens enable row level security;
 
 drop policy if exists "dono ve seus clientes" on clientes;
-create policy "dono ve seus clientes" on clientes for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve seus clientes" on clientes for select to authenticated
+  using (usuario_id = auth.uid());
 
 drop policy if exists "dono ve seus envios" on envios;
-create policy "dono ve seus envios" on envios for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve seus envios" on envios for select to authenticated
+  using (usuario_id = auth.uid());
 
 drop policy if exists "dono ve seus envio_itens" on envio_itens;
-create policy "dono ve seus envio_itens" on envio_itens for all to authenticated
+create policy "dono ve seus envio_itens" on envio_itens for select to authenticated
   using (envio_id in (select id from envios where usuario_id = auth.uid()));
 
 -- Sessão do WhatsApp (Baileys), no lugar do antigo diretório em disco
@@ -156,16 +156,16 @@ alter table cliente_tags enable row level security;
 alter table respostas_rapidas enable row level security;
 
 drop policy if exists "dono ve suas tags" on tags;
-create policy "dono ve suas tags" on tags for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve suas tags" on tags for select to authenticated
+  using (usuario_id = auth.uid());
 
 drop policy if exists "dono ve suas cliente_tags" on cliente_tags;
-create policy "dono ve suas cliente_tags" on cliente_tags for all to authenticated
+create policy "dono ve suas cliente_tags" on cliente_tags for select to authenticated
   using (cliente_id in (select id from clientes where usuario_id = auth.uid()));
 
 drop policy if exists "dono ve suas respostas_rapidas" on respostas_rapidas;
-create policy "dono ve suas respostas_rapidas" on respostas_rapidas for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve suas respostas_rapidas" on respostas_rapidas for select to authenticated
+  using (usuario_id = auth.uid());
 
 -- Só o backend (service_role) acessa essa tabela, então RLS fica travado por padrão.
 alter table whatsapp_sessions enable row level security;
@@ -238,11 +238,11 @@ alter table mensagens enable row level security;
 -- create policy não tem "if not exists" no Postgres, por isso o drop antes
 -- (padrão idempotente, igual o resto deste arquivo)
 drop policy if exists "dono ve suas conversas" on conversas;
-create policy "dono ve suas conversas" on conversas for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve suas conversas" on conversas for select to authenticated
+  using (usuario_id = auth.uid());
 
 drop policy if exists "dono ve suas mensagens" on mensagens;
-create policy "dono ve suas mensagens" on mensagens for all to authenticated
+create policy "dono ve suas mensagens" on mensagens for select to authenticated
   using (conversa_id in (select id from conversas where usuario_id = auth.uid()));
 
 -- Habilita Realtime (INSERT/UPDATE) nessas duas tabelas -- é isso que o front escuta

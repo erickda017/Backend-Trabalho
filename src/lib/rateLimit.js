@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 // [2026-09] Rate limiting básico -- antes nenhuma rota tinha proteção contra
 // abuso além do próprio ritmo de envio do WhatsApp (delay entre mensagens).
@@ -24,8 +24,10 @@ import rateLimit from 'express-rate-limit';
 // hoje (Render free tier roda 1 instância só); se isso mudar, precisa de um
 // store compartilhado (ex.: Redis) pros limites valerem pro sistema
 // inteiro, não por instância.
+// ipKeyGenerator agrupa IPv6 por /56 -- sem isso cada endereço IPv6 de um
+// mesmo cliente contava como pessoa diferente (fura o limite).
 function chave(req) {
-  return req.user?.id || req.ip;
+  return req.user?.id || ipKeyGenerator(req.ip);
 }
 
 export const limiteGeral = rateLimit({

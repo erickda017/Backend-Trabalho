@@ -82,5 +82,5 @@ create unique index if not exists safras_historico_usuario_safra_key on safras_h
 alter table safras_historico enable row level security;
 
 drop policy if exists "dono ve seu historico de safras" on safras_historico;
-create policy "dono ve seu historico de safras" on safras_historico for all to authenticated
-  using (usuario_id = auth.uid()) with check (usuario_id = auth.uid());
+create policy "dono ve seu historico de safras" on safras_historico for select to authenticated
+  using (usuario_id = auth.uid());

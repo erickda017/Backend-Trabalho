@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import dotenv from 'dotenv';
 
 import { startWhatsApp, iniciarLimpezaSessoesInativas } from './services/whatsapp.js';
@@ -34,18 +35,27 @@ import { iniciarConsolidacaoSafras } from './lib/safras.js';
 
 dotenv.config();
 
-// Checagem de variáveis obrigatórias na subida — sem isso o servidor loga um aviso
-// claro e continua no ar (health check passa, rotas de auth funcionam), em vez de
-// crashar sem explicação. Sem essas duas o WhatsApp/banco não funcionam, mas o
-// serviço não cai por isso.
+// Checagem de variáveis obrigatórias na subida.
 const obrigatorias = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
 const faltando = obrigatorias.filter((v) => !process.env[v]);
-if (faltando.length) {
-  console.error(
-    `[server] AVISO: variável(is) de ambiente faltando: ${faltando.join(', ')}. ` +
-      'O servidor vai subir mesmo assim, mas WhatsApp/banco/disparo não vão funcionar ' +
-      'até você configurar isso no Render (Environment → adicionar as chaves do Supabase).'
-  );
+const emProducaoBoot = Boolean(process.env.RENDER) || process.env.NODE_ENV === 'production';
+// [2026-10] SEGURANÇA (auditoria): em produção, sobe SÓ com a configuração
+// mínima certa (fail-fast). Antes subia com Supabase "placeholder" e CORS
+// fechado, dando "Failed to fetch" sem explicação. Em dev local continua só
+// avisando. Variáveis opcionais (planilha, R2, webhook) são validadas no
+// próprio módulo quando usadas.
+const errosConfig = [];
+if (faltando.length) errosConfig.push(`faltando: ${faltando.join(', ')}`);
+if (emProducaoBoot && !process.env.FRONTEND_ORIGIN) errosConfig.push('faltando: FRONTEND_ORIGIN');
+if (/[*]/.test(process.env.FRONTEND_ORIGIN || '')) errosConfig.push('FRONTEND_ORIGIN não pode ter * (wildcard)');
+if (emProducaoBoot && process.env.SUPABASE_URL && !/^https:\/\//.test(process.env.SUPABASE_URL.trim())) errosConfig.push('SUPABASE_URL precisa ser https://');
+if (errosConfig.length) {
+  const msg = `[server] configuração inválida: ${errosConfig.join(' | ')}. Corrija em Render → Environment.`;
+  if (emProducaoBoot) {
+    console.error(msg);
+    process.exit(1);
+  }
+  console.error(`${msg} (dev local: subindo mesmo assim)`);
 }
 
 // Rede de segurança: uma promise rejeitada sem .catch() derrubava o processo inteiro
@@ -58,6 +68,25 @@ process.on('unhandledRejection', (reason) => {
 
 const app = express();
 
+// [2026-10] SEGURANÇA (auditoria): atrás do proxy do Render, sem isto
+// req.ip era o IP do proxy -- o rate limit por IP virava UM balde pra
+// internet inteira (qualquer anônimo travava a API de todo mundo). 1 = só o
+// salto do Render é confiável (X-Forwarded-For forjado pelo cliente não vale).
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
+
+// Cabeçalhos de segurança. API só devolve JSON/arquivo (nunca HTML), então
+// CSP fechada; crossOriginResourcePolicy 'cross-origin' porque o front
+// (Vercel) busca arquivos do proxy por fetch. Remove X-Powered-By.
+app.use(
+  helmet({
+    contentSecurityPolicy: { useDefaults: false, directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] } },
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    crossOriginEmbedderPolicy: false,
+    referrerPolicy: { policy: 'no-referrer' },
+    hsts: { maxAge: 31536000, includeSubDomains: true },
+  }),
+);
+
 // [2026-08] SEGURANÇA: em produção, CORS aberto (origin: true, libera
 // QUALQUER site) nunca é aceitável -- basta esquecer de configurar
 // FRONTEND_ORIGIN no Render (fácil de acontecer num deploy apressado) pra
@@ -68,7 +97,7 @@ const app = express();
 // esquecer de marcar "isso é produção".
 const emProducao = Boolean(process.env.RENDER) || process.env.NODE_ENV === 'production';
 const origensPermitidas = process.env.FRONTEND_ORIGIN
-  ? process.env.FRONTEND_ORIGIN.split(',').map((o) => o.trim())
+  ? process.env.FRONTEND_ORIGIN.split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean)
   : emProducao
     ? [] // produção sem FRONTEND_ORIGIN configurada: bloqueia todo CORS (fail-safe) em vez de liberar geral
     : true; // dev local sem a env var: sem restrição, pra não travar quem tá rodando na máquina
@@ -83,15 +112,24 @@ if (emProducao && !process.env.FRONTEND_ORIGIN) {
   );
 }
 
-app.use(cors({ origin: origensPermitidas }));
+// [2026-10] Auth é Bearer (header Authorization), NÃO cookie: o navegador
+// não manda o token sozinho, então não há CSRF e `credentials` fica DESLIGADO
+// de propósito (ligar só abriria espaço pra cookie cross-site no futuro).
+app.use(
+  cors({
+    origin: origensPermitidas,
+    credentials: false,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
+    maxAge: 600,
+  }),
+);
 // Limite maior que o default (100kb) por causa da importação client-side
 // (POST /api/importacao/lote): o payload é só texto (nome, telefone, URLs do
 // Storage, código Pix) para até 1000 linhas, o que pode passar de 100kb em
 // lotes grandes. 5MB dá folga confortável sem risco real de RAM -- é texto, não
 // o PDF binário que costumava vir junto (esse nunca mais passa pelo servidor
 // nesse fluxo).
-app.use(express.json({ limit: '5mb' }));
-
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // [2026-09] Rate limiting básico em toda /api/* -- ver lib/rateLimit.js.
@@ -101,6 +139,14 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 // middleware. Rotas de maior impacto (disparo, importação, upload) ganham
 // um limite mais apertado por cima deste, aplicado localmente em cada rota.
 app.use('/api', limiteGeral);
+// [2026-10] Parse do JSON DEPOIS do rate limit (antes, anônimo fazia o
+// servidor bufferizar 5 MB por requisição sem limite nenhum). Respostas da
+// API têm dado pessoal: nunca cachear.
+app.use(express.json({ limit: '5mb' }));
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 
 // todas as rotas abaixo exigem login (Supabase Auth)
 app.use('/api/whatsapp', requireAuth, whatsappRoutes);
@@ -143,8 +189,11 @@ app.use('/api/integracao/planilha', requireAuth, integracaoPlanilhaRoutes);
 // errado) ou qualquer exceção síncrona em uma rota caem no handler padrão do Express,
 // que responde com uma página HTML em vez de JSON (quebra o `res.json()` que o frontend espera).
 app.use((err, req, res, next) => {
+  const status = err.status || err.statusCode || 500;
   console.error('[server] erro não tratado:', err.message);
-  res.status(err.status || 500).json({ error: err.message || 'Erro interno' });
+  // [2026-10] 5xx não devolve a mensagem interna (detalhe de Postgres/SDK);
+  // 4xx (multer, JSON inválido, arquivo grande) segue explicando o motivo.
+  res.status(status).json({ error: status >= 500 ? 'Erro interno' : err.message || 'Requisição inválida' });
 });
 
 const PORT = process.env.PORT || 3333;
@@ -171,5 +220,8 @@ const server = app.listen(PORT, () => {
 // no meio do processamento, mesmo com o back-end ainda trabalhando normalmente.
 // Desativa o timeout aqui; quem ainda limita isso é o proxy da hospedagem (ex:
 // Render), que fica fora do nosso controle -- ver nota no README_CLAUDE_BACKEND.md.
-server.requestTimeout = 0;
-server.headersTimeout = 0;
+// [2026-10] SEGURANÇA: antes 0/0 (sem limite) -- conexão lenta ficava aberta
+// pra sempre (slowloris). requestTimeout = tempo pra RECEBER o corpo (não o
+// processamento): 15 min cobre upload grande em rede ruim.
+server.requestTimeout = 15 * 60 * 1000;
+server.headersTimeout = 60 * 1000;

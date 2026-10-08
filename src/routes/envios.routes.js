@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { descreverErro } from '../lib/redigir.js';
 import multer from 'multer';
 import { supabase, BUCKET, CHAT_BUCKET, gerarSignedUrl, urlProxyArquivo } from '../lib/supabase.js';
 import { lerPaginacao } from '../lib/paginacao.js';
@@ -472,7 +473,7 @@ router.post('/:id/disparar', limiteSensivel, async (req, res) => {
   const { data: dono } = await supabase.from('envios').select('id').eq('id', id).eq('usuario_id', usuarioId).maybeSingle();
   if (!dono) return res.status(404).json({ error: 'Envio não encontrado' });
 
-  processarDisparo(id, usuarioId).catch((err) => console.error('[envios] erro no disparo:', err));
+  processarDisparo(id, usuarioId).catch((err) => console.error('[envios] erro no disparo:', descreverErro(err)));
   res.json({ ok: true, mensagem: 'Disparo iniciado em background' });
 });
 
@@ -487,7 +488,7 @@ router.post('/:id/reenviar-erros', limiteSensivel, async (req, res) => {
   const { data: dono } = await supabase.from('envios').select('id').eq('id', id).eq('usuario_id', usuarioId).maybeSingle();
   if (!dono) return res.status(404).json({ error: 'Envio não encontrado' });
 
-  reenviarErros(id, usuarioId).catch((err) => console.error('[envios] erro ao reenviar:', err));
+  reenviarErros(id, usuarioId).catch((err) => console.error('[envios] erro ao reenviar:', descreverErro(err)));
   res.json({ ok: true, mensagem: 'Reenvio dos itens com erro iniciado em background' });
 });
 

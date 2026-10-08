@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { descreverErro } from '../lib/redigir.js';
 import multer from 'multer';
 import { supabase, BUCKET, urlProxyArquivo } from '../lib/supabase.js';
 import { casarClientePorArquivo } from '../lib/nomeMatch.js';
@@ -136,7 +137,7 @@ router.post('/avulsas', limiteImportacaoArquivo, uploadPdfComTratamentoDeErro, a
 
     res.status(202).json({ associado: false, arquivo: nomeOriginal, pendencia_id: pendencia.id });
   } catch (err) {
-    console.error('[faturas-avulsas] erro:', err);
+    console.error('[faturas-avulsas] erro:', descreverErro(err));
     res.status(500).json({ error: err.message });
   }
 });

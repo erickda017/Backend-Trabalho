@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { descreverErro } from '../lib/redigir.js';
 import multer from 'multer';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -79,7 +80,7 @@ router.post('/extrair-servidor', limiteImportacaoArquivo, uploadServidorComTrata
 
     res.status(201).json({ encontrado: true, ...extracaoSalva, pagina: resultado.pagina });
   } catch (err) {
-    console.error('[pix] erro em /extrair-servidor:', err);
+    console.error('[pix] erro em /extrair-servidor:', descreverErro(err));
     res.status(500).json({ error: err.message || 'Falha ao extrair o Pix no servidor' });
   } finally {
     // Apaga o temporário SEMPRE -- sucesso, falha ou "não encontrado". É o

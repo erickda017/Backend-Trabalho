@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { descreverErro } from '../lib/redigir.js';
 import { isValidPixPayload } from '../lib/pixValidacao.js';
 import { persistirExtracaoPix } from '../lib/pixPersistencia.js';
 
@@ -51,7 +52,7 @@ router.post('/salvar-pix', async (req, res) => {
     });
     res.status(201).json(resultado);
   } catch (err) {
-    console.error('[boletos] erro em /salvar-pix:', err);
+    console.error('[boletos] erro em /salvar-pix:', descreverErro(err));
     res.status(500).json({ error: err.message });
   }
 });

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { descreverErro } from '../lib/redigir.js';
 import { supabase } from '../lib/supabase.js';
 import { buscarTodos } from '../lib/buscarTodos.js';
 import { limiteSensivel } from '../lib/rateLimit.js';
@@ -43,7 +44,7 @@ router.post('/atualizar', limiteSensivel, (req, res) => {
       else console.log(`[planilha] ${t.status} (usuário ${req.user.id}): ${t.resumo?.verificadas ?? 0} Pix conferidos de ${t.extracoesEnviadas} enviados.`);
     })
     .catch((err) => {
-      console.error('[planilha] erro inesperado:', err);
+      console.error('[planilha] erro inesperado:', descreverErro(err));
       Object.assign(tarefa, { status: 'erro', etapa: 'fim', erro: err.message, mensagem: err.message, terminadoEm: new Date().toISOString() });
     });
   res.status(202).json({ tarefa, jaEmAndamento: false });

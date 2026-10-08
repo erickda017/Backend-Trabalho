@@ -121,3 +121,28 @@ GitHub:
 Cloudflare (Worker de OCR):
 - Restringir CORS do Worker ao domínio da Vercel e exigir o JWT do Supabase
   (validar com `SUPABASE_URL/auth/v1/user`) ou um token assinado pelo backend.
+
+## Rodada 2 (2026-10): logs, criptografia, entrada/saída
+
+- **Logs sem dado de cliente**: `src/lib/redigir.js` mascara telefone, jid do
+  WhatsApp, e-mail, CPF/CNPJ, Pix copia-e-cola, JWT e Bearer em TODO `console.*`
+  (instalado por `logSeguroInit.js`, 1º import do `server.js`). Erros são
+  logados com `descreverErro()` (sem `details`/linha do Postgres). Log de
+  disparo usa id do cliente, nunca nome.
+- **Criptografia em repouso**: `src/lib/criptografia.js` (AES-256-GCM,
+  `DATA_ENCRYPTION_KEY` = 32 bytes base64, só no Render). A sessão do Baileys
+  (`whatsapp_sessions`) vai cifrada (`{__enc: "enc:v1:..."}`); linhas antigas são
+  cifradas no boot, antes do WhatsApp subir. Sem a chave, segue em texto puro e
+  loga aviso. **Guarde a chave: perdeu = precisa escanear o QR de novo.**
+  `hashComChave()` (HMAC-SHA256) disponível para indexar/comparar sem guardar o valor.
+- Senhas: Supabase Auth (bcrypt) -- o sistema nunca vê nem guarda senha.
+- Entrada: toda rota `/api/*` (exceto `/health`) exige JWT; sem `...req.body` em
+  insert/update; busca escapa sintaxe do PostgREST (`escaparFiltroPostgrest`).
+- Não coberto ainda: PDFs/anexos nos buckets (privados, URL assinada curta, mas
+  sem cifra própria -- leitura passa por URL assinada também no Baileys);
+  `pix_code`/telefone em colunas (usados em busca/filtro; precisariam de coluna
+  de hash + migração); segredo do webhook ainda vai no header `X-Webhook-Secret`
+  (a assinatura HMAC já vai junto -- remover o header exige ajustar o receptor).
+
+Render: adicionar `DATA_ENCRYPTION_KEY` (gerar com
+`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`).

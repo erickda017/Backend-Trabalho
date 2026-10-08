@@ -249,7 +249,7 @@ async function enviarItem(item, envio, usuarioId) {
     });
     if (!statusGravado) {
       console.error(
-        `[dispatch] CRÍTICO: mensagem enviada pro WhatsApp mas não foi possível gravar o status no banco pro item ${item.id} (cliente ${cliente.nome}). NÃO reenviar automaticamente -- corrigir manualmente pra evitar duplicar o envio.`,
+        `[dispatch] CRÍTICO: mensagem enviada pro WhatsApp mas não foi possível gravar o status no banco pro item ${item.id} (cliente ${cliente.id}). NÃO reenviar automaticamente -- corrigir manualmente pra evitar duplicar o envio.`,
       );
     }
 

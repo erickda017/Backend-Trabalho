@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { descreverErro } from '../lib/redigir.js';
 import multer from 'multer';
 import { supabase } from '../lib/supabase.js';
 import { parsePlanilhaChip, processarImportacaoChip } from '../services/importLoteChip.js';
@@ -46,7 +47,7 @@ router.post('/importar', limiteSensivel, uploadPlanilhaComTratamentoDeErro, asyn
     const resultado = await processarImportacaoChip({ itens, semDados, usuarioId: req.user.id });
     res.status(201).json(resultado);
   } catch (err) {
-    console.error('[ativacao-chip] erro ao importar planilha:', err);
+    console.error('[ativacao-chip] erro ao importar planilha:', descreverErro(err));
     res.status(500).json({ error: err.message });
   }
 });

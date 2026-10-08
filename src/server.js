@@ -1,3 +1,4 @@
+import './lib/logSeguroInit.js';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -10,6 +11,9 @@ import { iniciarLimpezaAutomatica } from './services/limpezaAutomatica.js';
 import { requireAuth } from './middleware/auth.js';
 import { requireSupervisor } from './middleware/supervisor.js';
 import { limiteGeral } from './lib/rateLimit.js';
+import { descreverErro } from './lib/redigir.js';
+import { cifrarSessoesLegadas } from './lib/supabaseAuthState.js';
+import { criptografiaAtiva } from './lib/criptografia.js';
 import whatsappRoutes from './routes/whatsapp.routes.js';
 import clientesRoutes from './routes/clientes.routes.js';
 import enviosRoutes from './routes/envios.routes.js';
@@ -49,6 +53,15 @@ if (faltando.length) errosConfig.push(`faltando: ${faltando.join(', ')}`);
 if (emProducaoBoot && !process.env.FRONTEND_ORIGIN) errosConfig.push('faltando: FRONTEND_ORIGIN');
 if (/[*]/.test(process.env.FRONTEND_ORIGIN || '')) errosConfig.push('FRONTEND_ORIGIN não pode ter * (wildcard)');
 if (emProducaoBoot && process.env.SUPABASE_URL && !/^https:\/\//.test(process.env.SUPABASE_URL.trim())) errosConfig.push('SUPABASE_URL precisa ser https://');
+if (process.env.DATA_ENCRYPTION_KEY) {
+  try {
+    criptografiaAtiva();
+  } catch (e) {
+    errosConfig.push(e.message);
+  }
+} else if (emProducaoBoot) {
+  console.warn('[server] AVISO: DATA_ENCRYPTION_KEY não definida -- sessão do WhatsApp fica em texto puro no Supabase. Gere 32 bytes base64 e configure no Render.');
+}
 if (errosConfig.length) {
   const msg = `[server] configuração inválida: ${errosConfig.join(' | ')}. Corrija em Render → Environment.`;
   if (emProducaoBoot) {
@@ -63,7 +76,7 @@ if (errosConfig.length) {
 // aconteceu na prática com as chamadas de startup abaixo quando o Supabase não estava
 // configurado ainda. Logamos e seguimos no ar em vez de matar o serviço.
 process.on('unhandledRejection', (reason) => {
-  console.error('[server] promise rejeitada sem tratamento:', reason);
+  console.error('[server] promise rejeitada sem tratamento:', descreverErro(reason));
 });
 
 const app = express();
@@ -190,7 +203,7 @@ app.use('/api/integracao/planilha', requireAuth, integracaoPlanilhaRoutes);
 // que responde com uma página HTML em vez de JSON (quebra o `res.json()` que o frontend espera).
 app.use((err, req, res, next) => {
   const status = err.status || err.statusCode || 500;
-  console.error('[server] erro não tratado:', err.message);
+  console.error('[server] erro não tratado:', descreverErro(err));
   // [2026-10] 5xx não devolve a mensagem interna (detalhe de Postgres/SDK);
   // 4xx (multer, JSON inválido, arquivo grande) segue explicando o motivo.
   res.status(status).json({ error: status >= 500 ? 'Erro interno' : err.message || 'Requisição inválida' });
@@ -203,9 +216,13 @@ const server = app.listen(PORT, () => {
 
   // Cada chamada de startup agora tem seu próprio .catch — uma falha em uma (ex:
   // Supabase mal configurado) não derruba as outras nem o processo inteiro.
-  startWhatsApp().catch((err) =>
-    console.error('[server] falha ao iniciar WhatsApp (servidor continua no ar):', err.message || err)
-  );
+  // [2026-10] Cifra sessões antigas ANTES de o Baileys começar a gravar (evita
+  // sobrescrever uma chave recém-rotacionada com a cópia antiga).
+  cifrarSessoesLegadas()
+    .then((n) => n && console.log(`[server] ${n} linha(s) de sessão do WhatsApp cifradas no banco`))
+    .catch((err) => console.error('[server] falha ao cifrar sessões legadas:', descreverErro(err)))
+    .then(() => startWhatsApp())
+    .catch((err) => console.error('[server] falha ao iniciar WhatsApp (servidor continua no ar):', descreverErro(err)));
   iniciarScheduler();
   iniciarLimpezaAutomatica();
   iniciarLimpezaSessoesInativas();

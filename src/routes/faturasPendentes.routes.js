@@ -10,6 +10,7 @@ import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 import { limiteImportacaoArquivo } from '../lib/rateLimit.js';
 import { armazenamento } from '../lib/armazenamento.js';
 import { buscarTodos } from '../lib/buscarTodos.js';
+import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
 
 // ---------------------------------------------------------------------------
 // "Upload de faturas avulsas, sem depender de planilha" -- pra quando o
@@ -221,6 +222,51 @@ router.delete('/avulsas/pendentes/:id', async (req, res) => {
   await armazenamento.from(BUCKET).remove([pendencia.pdf_path]);
   await supabase.from('faturas_pendentes').delete().eq('id', id).eq('usuario_id', usuarioId);
   res.json({ ok: true });
+});
+
+// [2026-10] Descarta TODAS as pendências do operador de uma vez (PDFs soltos
+// que não estão ligados a nenhum cliente). Pendência por definição não tem
+// cliente: ao ser associada, a linha sai desta tabela. Só mexe nas do próprio
+// usuário. Lote que falhar no Storage NÃO tem a linha apagada (fica pra nova
+// tentativa; não deixa arquivo órfão sem ponteiro).
+router.delete('/avulsas/pendentes', async (req, res) => {
+  const usuarioId = req.user.id;
+  try {
+    const { data: pendencias, error: listError } = await buscarTodos(() =>
+      supabase.from('faturas_pendentes').select('id, pdf_path').eq('usuario_id', usuarioId).order('id'),
+    );
+    if (listError) throw listError;
+    if (!pendencias.length) return res.json({ removidas: 0, falharam: 0 });
+
+    const TAMANHO_LOTE = 100;
+    let removidas = 0;
+    let falharam = 0;
+    for (let i = 0; i < pendencias.length; i += TAMANHO_LOTE) {
+      const lote = pendencias.slice(i, i + TAMANHO_LOTE);
+      const { error } = await armazenamento.from(BUCKET).remove(lote.map((p) => p.pdf_path).filter(Boolean));
+      if (error) {
+        falharam += lote.length;
+        continue;
+      }
+      const { error: delError } = await supabase
+        .from('faturas_pendentes')
+        .delete()
+        .eq('usuario_id', usuarioId)
+        .in('id', lote.map((p) => p.id));
+      if (delError) falharam += lote.length;
+      else removidas += lote.length;
+    }
+    await registrarAuditoriaExclusao({
+      entidade: 'faturas_pendentes',
+      entidadeId: 'todas',
+      usuario: req.user,
+      detalhes: { removidas, falharam },
+    });
+    res.json({ removidas, falharam });
+  } catch (err) {
+    console.error('[faturas-avulsas] erro ao apagar todas as pendências:', descreverErro(err));
+    res.status(500).json({ error: 'Erro interno' });
+  }
 });
 
 export default router;

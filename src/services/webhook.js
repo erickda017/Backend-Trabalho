@@ -42,8 +42,8 @@ export async function dispararWebhook(evento, dados) {
     // caminho, só que quem chamou "sabia" o segredo. Assinatura HMAC-SHA256
     // do corpo (padrão usado por Stripe/GitHub/etc.) deixa isso verificável:
     // quem recebe recalcula o HMAC com o mesmo segredo e compara com o header
-    // -- X-Webhook-Secret continua indo também, por compatibilidade com quem
-    // já integrou só checando ele.
+    // -- [2026-10] O segredo cru NÃO vai mais no header (vazava em log do
+    // receptor/proxy). Só a assinatura; o receptor valida recalculando o HMAC.
     const assinatura = WEBHOOK_SECRET ? createHmac('sha256', WEBHOOK_SECRET).update(corpo).digest('hex') : null;
 
     try {
@@ -51,7 +51,6 @@ export async function dispararWebhook(evento, dados) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(WEBHOOK_SECRET ? { 'X-Webhook-Secret': WEBHOOK_SECRET } : {}),
           ...(assinatura ? { 'X-Webhook-Signature': `sha256=${assinatura}` } : {}),
         },
         body: corpo,

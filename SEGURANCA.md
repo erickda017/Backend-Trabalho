@@ -141,8 +141,7 @@ Cloudflare (Worker de OCR):
 - Não coberto ainda: PDFs/anexos nos buckets (privados, URL assinada curta, mas
   sem cifra própria -- leitura passa por URL assinada também no Baileys);
   `pix_code`/telefone em colunas (usados em busca/filtro; precisariam de coluna
-  de hash + migração); segredo do webhook ainda vai no header `X-Webhook-Secret`
-  (a assinatura HMAC já vai junto -- remover o header exige ajustar o receptor).
+  de hash + migração); o segredo do webhook não vai mais no header (só `X-Webhook-Signature`, HMAC).
 
 Render: adicionar `DATA_ENCRYPTION_KEY` (gerar com
 `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`).

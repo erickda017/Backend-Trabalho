@@ -111,28 +111,39 @@ router.post('/importar-lista', limiteSensivel, async (req, res) => {
       continue;
     }
 
-    const { data, error } = await supabase
-      .from('clientes')
-      .upsert(
-        {
-          usuario_id: req.user.id,
-          nome: item.nome,
-          telefone: telefoneNormalizado,
-          valor: item.valor ?? null,
-          tipo_fatura: item.tipo_fatura ?? null,
-          data_prazo: item.data_prazo ?? null,
-          numero_contrato: item.numero_contrato ?? null,
-          data_contrato: item.data_contrato ?? null,
-        },
-        // [2026-09] Precisa incluir `campanha` no conflito (ver
-        // migration-25-ativacao-chip.sql) -- este fluxo é sempre da campanha
-        // 'cobranca' (default, nunca enviado aqui); sem `campanha` no
-        // conflito, um telefone já cadastrado na campanha de chip seria
-        // roubado por esta importação.
-        { onConflict: 'usuario_id,telefone,campanha' },
-      )
-      .select('id')
-      .single();
+    const gravar = (extra) =>
+      supabase
+        .from('clientes')
+        .upsert(
+          {
+            usuario_id: req.user.id,
+            nome: item.nome,
+            telefone: telefoneNormalizado,
+            valor: item.valor ?? null,
+            tipo_fatura: item.tipo_fatura ?? null,
+            data_prazo: item.data_prazo ?? null,
+            numero_contrato: item.numero_contrato ?? null,
+            data_contrato: item.data_contrato ?? null,
+            ...extra,
+          },
+          // [2026-09] Precisa incluir `campanha` no conflito (ver
+          // migration-25-ativacao-chip.sql) -- este fluxo é sempre da campanha
+          // 'cobranca' (default, nunca enviado aqui); sem `campanha` no
+          // conflito, um telefone já cadastrado na campanha de chip seria
+          // roubado por esta importação.
+          { onConflict: 'usuario_id,telefone,campanha' },
+        )
+        .select('id')
+        .single();
+    // [2026-10] `importado_em` (migration-29) marca a data DESTA importação,
+    // inclusive de quem já existia (o upsert não muda `created_at`). Se a
+    // migration ainda não rodou no banco, a coluna não existe e o PostgREST
+    // recusa o upsert inteiro -- aí regrava sem ela em vez de quebrar a
+    // importação (o filtro da tela cai pro `created_at`).
+    let { data, error } = await gravar({ importado_em: new Date().toISOString() });
+    if (error && (error.code === 'PGRST204' || error.code === '42703' || /importado_em/.test(error.message || ''))) {
+      ({ data, error } = await gravar({}));
+    }
 
     if (error) {
       erros.push({ ...item, erro: error.message });

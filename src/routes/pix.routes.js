@@ -9,7 +9,9 @@ import { responderExportacao } from '../lib/exportar.js';
 import { escaparFiltroPostgrest } from '../lib/filtros.js';
 import { persistirExtracaoPix } from '../lib/pixPersistencia.js';
 import { extrairPixDeArquivoNoServidor } from '../services/extratorServidorPix.js';
-import { limiteImportacaoArquivo } from '../lib/rateLimit.js';
+import { limiteImportacaoArquivo, limiteSensivel } from '../lib/rateLimit.js';
+import { contarExtracoesPix, apagarExtracoesPix } from '../lib/pixLimpeza.js';
+import { registrarAuditoriaExclusao } from '../lib/auditoria.js';
 
 // [2026-08] Esta rota NÃO recebe mais PDF nenhum pro fluxo PADRÃO. O upload +
 // extração de Pix (fatiar o PDF com pdf-lib, mandar cada página pro
@@ -167,6 +169,43 @@ router.post('/:id/aplicar', async (req, res) => {
   if (selectError) return res.status(500).json({ error: selectError.message });
 
   res.json(serializar(atualizada));
+});
+
+// [2026-10] Limpeza em lote da PRÓPRIA lista do operador (a lista passava de
+// mil linhas, sem como separar o que importa). `modo`: todas | sem_cliente |
+// com_erro | antes_de (+ `antes_de` AAAA-MM-DD). Preview nunca apaga; executar
+// exige `confirmacao: "APAGAR"` (validado aqui, não só no botão). Escopo
+// sempre `req.user.id` -- ver lib/pixLimpeza.js.
+function opcoesLimpezaPix(req) {
+  return { usuarioId: req.user.id, modo: req.body?.modo, antesDe: req.body?.antes_de };
+}
+
+router.post('/limpar/preview', limiteSensivel, async (req, res) => {
+  try {
+    res.json(await contarExtracoesPix(opcoesLimpezaPix(req)));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/limpar', limiteSensivel, async (req, res) => {
+  if (req.body?.confirmacao !== 'APAGAR') {
+    return res.status(400).json({ error: 'Digite "APAGAR" no campo de confirmação pra prosseguir.' });
+  }
+  try {
+    const opcoes = opcoesLimpezaPix(req);
+    const apagadas = await apagarExtracoesPix(opcoes);
+    await registrarAuditoriaExclusao({
+      entidade: 'pix_extracoes',
+      entidadeId: opcoes.modo,
+      usuario: req.user,
+      detalhes: { modo: opcoes.modo, antes_de: opcoes.antesDe ?? null, total_apagado: apagadas },
+    });
+    res.json({ apagadas });
+  } catch (err) {
+    console.error('[pix] erro ao limpar extrações:', descreverErro(err));
+    res.status(400).json({ error: err.message });
+  }
 });
 
 router.get('/exportar', async (req, res) => {

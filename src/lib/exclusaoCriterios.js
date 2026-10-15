@@ -14,12 +14,29 @@
 import { supabase, BUCKET, CHAT_BUCKET } from './supabase.js';
 import { rotuloSafra } from './safras.js';
 import { armazenamento } from './armazenamento.js';
+import { buscarTodos } from './buscarTodos.js';
+import { contarExtracoesPix, apagarExtracoesPix } from './pixLimpeza.js';
 
-// PostgREST corta em 1000 linhas sem `.limit()` explícito (mesmo bug já
-// corrigido em outras rotas, ver clientes.routes.js/GET) -- aqui não pagina
-// de verdade (é uma tela de manutenção, não uma listagem operacional), só
-// garante um teto alto o bastante pra não truncar em silêncio.
-const LIMITE_LINHAS = 50000;
+// [CRÍTICO -- bug real corrigido 2026-10] Antes isto usava `.limit(50000)`,
+// mas o PostgREST corta TODA resposta no "Max rows" do projeto (1000) e o
+// `.limit()` não passa por cima -- cada "APAGAR" processava no máximo 1000
+// clientes/mensagens e dizia que tinha terminado; o resto da carteira
+// continuava lá (relatado: "apaguei tudo e ainda sobraram vários clientes").
+// Agora toda leitura grande pagina com `buscarTodos` e todo `.in()` com muitos
+// ids é fatiado em lotes (URL do PostgREST tem tamanho máximo).
+const LOTE_IN = 200;
+
+function emLotes(lista, tamanho = LOTE_IN) {
+  const lotes = [];
+  for (let i = 0; i < lista.length; i += tamanho) lotes.push(lista.slice(i, i + tamanho));
+  return lotes;
+}
+
+async function lerTodos(montarQuery) {
+  const { data, error } = await buscarTodos(montarQuery);
+  if (error) throw error;
+  return data || [];
+}
 
 // [CRÍTICO -- bug real corrigido 2026-09, 2 rodadas] Rodada 1: esta função só
 // logava o erro e seguia a vida (mesmo "best-effort" que limpezaAutomatica.js
@@ -71,14 +88,9 @@ function amostraClientes(clientes) {
 // só que sob demanda e por critério escolhido em vez de por idade).
 // ---------------------------------------------------------------------------
 async function buscarClientesComPdf(coluna, valor) {
-  const { data, error } = await supabase
-    .from('clientes')
-    .select('id, nome, telefone, pdf_path')
-    .eq(coluna, valor)
-    .not('pdf_path', 'is', null)
-    .limit(LIMITE_LINHAS);
-  if (error) throw error;
-  return data || [];
+  return lerTodos(() =>
+    supabase.from('clientes').select('id, nome, telefone, pdf_path').eq(coluna, valor).not('pdf_path', 'is', null).order('id'),
+  );
 }
 
 async function apagarPdfsDeClientes(clientes) {
@@ -95,14 +107,16 @@ async function apagarPdfsDeClientes(clientes) {
     return 0;
   }
 
-  const { error } = await supabase
-    .from('clientes')
-    .update({ pdf_url: null, pdf_path: null, pdf_atualizado_em: null })
-    .in(
-      'id',
-      comSucesso.map((c) => c.id),
-    );
-  if (error) throw error;
+  for (const lote of emLotes(comSucesso)) {
+    const { error } = await supabase
+      .from('clientes')
+      .update({ pdf_url: null, pdf_path: null, pdf_atualizado_em: null })
+      .in(
+        'id',
+        lote.map((c) => c.id),
+      );
+    if (error) throw error;
+  }
 
   if (falharam.size) {
     console.error(`[exclusao] ${falharam.size} de ${clientes.length} PDF(s) não foram removidos do Storage -- pdf_path preservado pra esses.`);
@@ -149,14 +163,9 @@ const pdfsPorTipoFatura = {
 // em NENHUM critério (pdfs_por_safra só pega quem tem safra preenchida) --
 // relatado pelo usuário: 400+ PDFs assim, invisíveis pro painel inteiro.
 async function buscarClientesComPdfSemSafra() {
-  const { data, error } = await supabase
-    .from('clientes')
-    .select('id, nome, telefone, pdf_path')
-    .is('safra', null)
-    .not('pdf_path', 'is', null)
-    .limit(LIMITE_LINHAS);
-  if (error) throw error;
-  return data || [];
+  return lerTodos(() =>
+    supabase.from('clientes').select('id, nome, telefone, pdf_path').is('safra', null).not('pdf_path', 'is', null).order('id'),
+  );
 }
 
 const pdfsSemSafra = {
@@ -193,21 +202,19 @@ async function buscarClientesPorTagNome(tagNome) {
   const tagIds = (tags || []).map((t) => t.id);
   if (!tagIds.length) return [];
 
-  const { data: relacoes, error: relError } = await supabase
-    .from('cliente_tags')
-    .select('cliente_id')
-    .in('tag_id', tagIds)
-    .limit(LIMITE_LINHAS);
-  if (relError) throw relError;
-  const clienteIds = [...new Set((relacoes || []).map((r) => r.cliente_id))];
+  const relacoes = await lerTodos(() =>
+    supabase.from('cliente_tags').select('cliente_id, tag_id').in('tag_id', tagIds).order('cliente_id').order('tag_id'),
+  );
+  const clienteIds = [...new Set(relacoes.map((r) => r.cliente_id))];
   if (!clienteIds.length) return [];
 
-  const { data: clientes, error: clientesError } = await supabase
-    .from('clientes')
-    .select('id, nome, telefone, pdf_path')
-    .in('id', clienteIds);
-  if (clientesError) throw clientesError;
-  return clientes || [];
+  const clientes = [];
+  for (const lote of emLotes(clienteIds)) {
+    const { data, error: clientesError } = await supabase.from('clientes').select('id, nome, telefone, pdf_path').in('id', lote);
+    if (clientesError) throw clientesError;
+    clientes.push(...(data || []));
+  }
+  return clientes;
 }
 
 const clientesPorTag = {
@@ -231,16 +238,67 @@ const clientesPorTag = {
         console.error(`[exclusao] ${falharam.length} PDF(s) ficaram órfãos no Storage (cliente foi apagado mesmo assim). Primeiros:`, falharam.slice(0, 10));
       }
     }
-    const { error } = await supabase
-      .from('clientes')
-      .delete()
-      .in(
-        'id',
-        clientes.map((c) => c.id),
-      );
-    if (error) throw error;
+    await apagarClientesPorId(clientes.map((c) => c.id));
     return clientes.length;
   },
+};
+
+async function apagarClientesPorId(ids) {
+  for (const lote of emLotes(ids)) {
+    const { error } = await supabase.from('clientes').delete().in('id', lote);
+    if (error) throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// clientes_sem_fatura -- [2026-10] "sobras" da carteira: cliente que ficou só
+// com o nome depois que o PDF foi apagado (painel/limpeza de 40 dias) e nunca
+// mais recebeu fatura. Os critérios de PDF acima preservam o cliente de
+// propósito, então sem este não existia jeito de limpar a carteira em massa.
+// Só a campanha de cobrança (a de Ativação Chip nunca tem PDF/valor).
+// `sem_valor` (padrão true) exige também valor vazio -- é o que separa a
+// "sobra" de um cliente recém-importado que ainda espera o PDF mas já tem valor.
+// ---------------------------------------------------------------------------
+async function buscarClientesSemFatura(filtro) {
+  const semValor = filtro?.sem_valor !== false;
+  return lerTodos(() => {
+    let q = supabase
+      .from('clientes')
+      .select('id, nome, telefone')
+      .eq('campanha', 'cobranca')
+      .is('pdf_path', null)
+      .is('pdf_url', null);
+    if (semValor) q = q.is('valor', null);
+    return q.order('id');
+  });
+}
+
+const clientesSemFatura = {
+  label: 'Clientes sem fatura',
+  async contar(filtro) {
+    const clientes = await buscarClientesSemFatura(filtro);
+    return { quantidade: clientes.length, amostra: amostraClientes(clientes) };
+  },
+  async executar(filtro) {
+    const clientes = await buscarClientesSemFatura(filtro);
+    if (!clientes.length) return 0;
+    await apagarClientesPorId(clientes.map((c) => c.id));
+    return clientes.length;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// pix_extracoes -- histórico do Extrator de PIX (lista que passava de mil
+// linhas). Ver lib/pixLimpeza.js; aqui é a porta supervisor-wide (sem usuario_id).
+// ---------------------------------------------------------------------------
+function opcoesPix(filtro) {
+  return { usuarioId: null, modo: filtro?.modo, antesDe: filtro?.antes_de };
+}
+
+const pixExtracoes = {
+  label: 'Extrações de Pix',
+  contar: (filtro) => contarExtracoesPix(opcoesPix(filtro)),
+  executar: (filtro) => apagarExtracoesPix(opcoesPix(filtro)),
 };
 
 // ---------------------------------------------------------------------------
@@ -260,13 +318,22 @@ async function buscarConversasParaApagar(filtro) {
   const dias = Number(filtro?.dias_mais_antigo_que) || 0;
   if (dias < 0) throw new Error('"dias_mais_antigo_que" não pode ser negativo');
 
-  let query = supabase.from('conversas').select('id, telefone, nome_contato').limit(LIMITE_LINHAS);
-  if (campanha) query = query.eq('campanha', campanha);
-  if (dias > 0) query = query.lt('ultima_mensagem_em', limiteDeData(dias));
+  return lerTodos(() => {
+    let query = supabase.from('conversas').select('id, telefone, nome_contato');
+    if (campanha) query = query.eq('campanha', campanha);
+    if (dias > 0) query = query.lt('ultima_mensagem_em', limiteDeData(dias));
+    return query.order('id');
+  });
+}
 
-  const { data, error } = await query;
-  if (error) throw error;
-  return data || [];
+async function contarMensagensDeConversas(ids) {
+  let total = 0;
+  for (const lote of emLotes(ids)) {
+    const { count, error } = await supabase.from('mensagens').select('id', { count: 'exact', head: true }).in('conversa_id', lote);
+    if (error) throw error;
+    total += count || 0;
+  }
+  return total;
 }
 
 const historicoMensagens = {
@@ -275,10 +342,8 @@ const historicoMensagens = {
     const conversas = await buscarConversasParaApagar(filtro);
     if (!conversas.length) return { quantidade: 0, amostra: [] };
     const ids = conversas.map((c) => c.id);
-    const { count, error } = await supabase.from('mensagens').select('id', { count: 'exact', head: true }).in('conversa_id', ids);
-    if (error) throw error;
     return {
-      quantidade: count || 0,
+      quantidade: await contarMensagensDeConversas(ids),
       amostra: conversas.slice(0, 5).map((c) => `${c.nome_contato || c.telefone}`),
     };
   },
@@ -287,17 +352,17 @@ const historicoMensagens = {
     if (!conversas.length) return 0;
     const ids = conversas.map((c) => c.id);
 
-    const { data: mensagens, error: msgError } = await supabase
-      .from('mensagens')
-      .select('id, anexo_path')
-      .in('conversa_id', ids)
-      .limit(LIMITE_LINHAS);
-    if (msgError) throw msgError;
+    const mensagens = [];
+    for (const lote of emLotes(ids)) {
+      mensagens.push(
+        ...(await lerTodos(() => supabase.from('mensagens').select('id, anexo_path').in('conversa_id', lote).order('id'))),
+      );
+    }
 
     // Conversas são apagadas de qualquer forma (é o propósito deste
     // critério); falha isolada num anexo não bloqueia -- só loga alto pra
     // não silenciar um órfão no bucket chat-midia.
-    const caminhos = (mensagens || []).map((m) => m.anexo_path).filter(Boolean);
+    const caminhos = mensagens.map((m) => m.anexo_path).filter(Boolean);
     if (caminhos.length) {
       const falharam = await removerDoStorageEmLotes(CHAT_BUCKET, caminhos);
       if (falharam.length) {
@@ -305,9 +370,11 @@ const historicoMensagens = {
       }
     }
 
-    const { error } = await supabase.from('conversas').delete().in('id', ids);
-    if (error) throw error;
-    return (mensagens || []).length;
+    for (const lote of emLotes(ids)) {
+      const { error } = await supabase.from('conversas').delete().in('id', lote);
+      if (error) throw error;
+    }
+    return mensagens.length;
   },
 };
 
@@ -316,6 +383,8 @@ export const CRITERIOS = {
   pdfs_por_tipo_fatura: pdfsPorTipoFatura,
   pdfs_sem_safra: pdfsSemSafra,
   clientes_por_tag: clientesPorTag,
+  clientes_sem_fatura: clientesSemFatura,
+  pix_extracoes: pixExtracoes,
   historico_mensagens: historicoMensagens,
 };
 
@@ -327,29 +396,23 @@ export const CRITERIOS = {
 // nunca apaga nada.
 // ---------------------------------------------------------------------------
 async function contarMensagensPorCampanha(campanha) {
-  const { data: conversas, error } = await supabase.from('conversas').select('id').eq('campanha', campanha).limit(LIMITE_LINHAS);
-  if (error) throw error;
-  const ids = (conversas || []).map((c) => c.id);
+  const conversas = await lerTodos(() => supabase.from('conversas').select('id').eq('campanha', campanha).order('id'));
+  const ids = conversas.map((c) => c.id);
   if (!ids.length) return { conversas: 0, mensagens: 0 };
-  const { count, error: msgErr } = await supabase.from('mensagens').select('id', { count: 'exact', head: true }).in('conversa_id', ids);
-  if (msgErr) throw msgErr;
-  return { conversas: ids.length, mensagens: count || 0 };
+  return { conversas: ids.length, mensagens: await contarMensagensDeConversas(ids) };
 }
 
 export async function montarResumoExclusao() {
   const itens = [];
 
-  const { data: clientesComPdf, error: pdfErr } = await supabase
-    .from('clientes')
-    .select('safra, tipo_fatura')
-    .not('pdf_path', 'is', null)
-    .limit(LIMITE_LINHAS);
-  if (pdfErr) throw pdfErr;
+  const clientesComPdf = await lerTodos(() =>
+    supabase.from('clientes').select('safra, tipo_fatura').not('pdf_path', 'is', null).order('id'),
+  );
 
   const porSafra = new Map();
   const porTipo = new Map();
   let semSafra = 0;
-  for (const c of clientesComPdf || []) {
+  for (const c of clientesComPdf) {
     if (c.safra) porSafra.set(c.safra, (porSafra.get(c.safra) || 0) + 1);
     else semSafra += 1;
     if (c.tipo_fatura) porTipo.set(c.tipo_fatura, (porTipo.get(c.tipo_fatura) || 0) + 1);
@@ -382,8 +445,7 @@ export async function montarResumoExclusao() {
     });
   }
 
-  const { data: tags, error: tagsErr } = await supabase.from('tags').select('nome');
-  if (tagsErr) throw tagsErr;
+  const tags = await lerTodos(() => supabase.from('tags').select('nome').order('id'));
   const nomesUnicos = [...new Set((tags || []).map((t) => t.nome.trim()))];
   const resultadosTags = await Promise.all(
     nomesUnicos.map(async (nome) => ({ nome, clientes: await buscarClientesPorTagNome(nome) })),
@@ -397,6 +459,38 @@ export async function montarResumoExclusao() {
         quantidade: clientes.length,
         detalhe: `${clientes.length} cliente(s)`,
       });
+    }
+  }
+
+  const semFatura = await buscarClientesSemFatura({ sem_valor: true });
+  if (semFatura.length) {
+    itens.push({
+      criterio: 'clientes_sem_fatura',
+      filtro: { sem_valor: true },
+      rotulo: 'Clientes — sem PDF e sem valor (sobras)',
+      quantidade: semFatura.length,
+      detalhe: `${semFatura.length} cliente(s) que ficaram só com o nome`,
+    });
+  }
+  const semPdfComValor = (await buscarClientesSemFatura({ sem_valor: false })).length - semFatura.length;
+  if (semPdfComValor > 0) {
+    itens.push({
+      criterio: 'clientes_sem_fatura',
+      filtro: { sem_valor: false },
+      rotulo: 'Clientes — sem PDF (mesmo com valor)',
+      quantidade: semPdfComValor + semFatura.length,
+      detalhe: `${semPdfComValor + semFatura.length} cliente(s) sem PDF, incluindo os que ainda têm valor`,
+    });
+  }
+
+  for (const [modo, rotulo] of [
+    ['todas', 'Extrações de Pix — todas'],
+    ['sem_cliente', 'Extrações de Pix — sem cliente vinculado'],
+    ['com_erro', 'Extrações de Pix — com erro / não encontrado'],
+  ]) {
+    const { quantidade } = await contarExtracoesPix({ usuarioId: null, modo });
+    if (quantidade > 0) {
+      itens.push({ criterio: 'pix_extracoes', filtro: { modo }, rotulo, quantidade, detalhe: `${quantidade} extração(ões)` });
     }
   }
 

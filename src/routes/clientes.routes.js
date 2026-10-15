@@ -18,6 +18,8 @@ import { nomeArquivoSeguro } from '../lib/nomeArquivoSeguro.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 import { limiteSensivel, limiteImportacaoArquivo } from '../lib/rateLimit.js';
 import { armazenamento } from '../lib/armazenamento.js';
+import { buscarTodos } from '../lib/buscarTodos.js';
+import { criarIndiceDuplicados } from '../lib/duplicadosImportacao.js';
 
 const router = Router();
 const upload = multer({
@@ -103,6 +105,23 @@ router.post('/importar-lista', limiteSensivel, async (req, res) => {
 
   const criados = [];
   const erros = [];
+  const jaExistiam = [];
+
+  // [2026-10] SÓ ADICIONA O QUE É NOVO: carrega a carteira de cobrança do
+  // operador uma vez e pula quem já está cadastrado (mesmo telefone ou mesmo
+  // contrato) em vez de regravar -- ver lib/duplicadosImportacao.js. Antes era
+  // upsert por telefone: sobrescrevia o cliente existente e, com telefone novo
+  // mas contrato repetido, caía no índice único de contrato com erro.
+  const { data: existentes, error: existentesError } = await buscarTodos(() =>
+    supabase
+      .from('clientes')
+      .select('telefone, numero_contrato')
+      .eq('usuario_id', req.user.id)
+      .eq('campanha', 'cobranca')
+      .order('id'),
+  );
+  if (existentesError) return res.status(500).json({ error: existentesError.message });
+  const indice = criarIndiceDuplicados(existentes);
 
   for (const item of itens) {
     const telefoneNormalizado = normalizarTelefone(item?.numero);
@@ -111,72 +130,63 @@ router.post('/importar-lista', limiteSensivel, async (req, res) => {
       continue;
     }
 
+    const motivoDuplicata = indice.motivo(telefoneNormalizado, item.numero_contrato);
+    if (motivoDuplicata) {
+      jaExistiam.push({ nome: item.nome, motivo: motivoDuplicata });
+      continue;
+    }
+
+    // `campanha` fica no default ('cobranca') -- este fluxo nunca grava a
+    // carteira de Ativação Chip. `importado_em` (migration-29) marca a data da
+    // importação; se a migration ainda não rodou, a coluna não existe e o
+    // PostgREST recusa o insert inteiro -- aí regrava sem ela.
     const gravar = (extra) =>
       supabase
         .from('clientes')
-        .upsert(
-          {
-            usuario_id: req.user.id,
-            nome: item.nome,
-            telefone: telefoneNormalizado,
-            valor: item.valor ?? null,
-            tipo_fatura: item.tipo_fatura ?? null,
-            data_prazo: item.data_prazo ?? null,
-            numero_contrato: item.numero_contrato ?? null,
-            data_contrato: item.data_contrato ?? null,
-            ...extra,
-          },
-          // [2026-09] Precisa incluir `campanha` no conflito (ver
-          // migration-25-ativacao-chip.sql) -- este fluxo é sempre da campanha
-          // 'cobranca' (default, nunca enviado aqui); sem `campanha` no
-          // conflito, um telefone já cadastrado na campanha de chip seria
-          // roubado por esta importação.
-          { onConflict: 'usuario_id,telefone,campanha' },
-        )
+        .insert({
+          usuario_id: req.user.id,
+          nome: item.nome,
+          telefone: telefoneNormalizado,
+          valor: item.valor ?? null,
+          tipo_fatura: item.tipo_fatura ?? null,
+          data_prazo: item.data_prazo ?? null,
+          numero_contrato: item.numero_contrato ?? null,
+          data_contrato: item.data_contrato ?? null,
+          ...extra,
+        })
         .select('id')
         .single();
-    // [2026-10] `importado_em` (migration-29) marca a data DESTA importação,
-    // inclusive de quem já existia (o upsert não muda `created_at`). Se a
-    // migration ainda não rodou no banco, a coluna não existe e o PostgREST
-    // recusa o upsert inteiro -- aí regrava sem ela em vez de quebrar a
-    // importação (o filtro da tela cai pro `created_at`).
     let { data, error } = await gravar({ importado_em: new Date().toISOString() });
     if (error && (error.code === 'PGRST204' || error.code === '42703' || /importado_em/.test(error.message || ''))) {
       ({ data, error } = await gravar({}));
     }
 
     if (error) {
-      erros.push({ ...item, erro: error.message });
+      // 23505 = índice único (telefone/contrato) -- outra importação gravou o
+      // mesmo cliente entre a leitura acima e este insert: é duplicata, não erro.
+      if (error.code === '23505') {
+        jaExistiam.push({ nome: item.nome, motivo: 'já cadastrado' });
+      } else {
+        erros.push({ ...item, erro: error.message });
+      }
       continue;
     }
+    indice.registrar(telefoneNormalizado, item.numero_contrato);
     criados.push({ ...item, cliente_id: data.id });
-
-    // [bug] Este upsert grava só a própria linha (por telefone) -- se este
-    // número já estiver vinculado a um grupo (migration-15) de uma
-    // importação/vínculo anterior, os OUTROS números do grupo ficavam sem
-    // o tipo_fatura/data_prazo/valor desta reimportação (só quem sobe PDF/PIX
-    // ou usa PUT /:id passava por propagarDadosFatura). Propaga aqui também,
-    // pra manter os números vinculados sempre com a mesma fatura -- mesma
-    // regra de faturaPropagacao.js. Best-effort: não falha o item por causa
-    // disso, já que a própria linha já foi gravada com sucesso acima.
-    try {
-      await propagarDadosFatura(data.id, req.user.id, {
-        valor: item.valor ?? null,
-        tipo_fatura: item.tipo_fatura ?? null,
-        data_prazo: item.data_prazo ?? null,
-        numero_contrato: item.numero_contrato ?? null,
-        data_contrato: item.data_contrato ?? null,
-      });
-    } catch (propagacaoError) {
-      console.error('[clientes] erro ao propagar fatura no import da lista crua:', propagacaoError.message);
-    }
 
     // Mesmo comportamento do cadastro manual (POST /) -- ver comentário lá.
     await associarPendentesAoCliente(data.id, item.nome, req.user.id);
     await associarPixPendenteAoCliente(data.id, item.nome, req.user.id);
   }
 
-  res.status(201).json({ criados: criados.length, erros, total: itens.length });
+  res.status(201).json({
+    criados: criados.length,
+    ja_existiam: jaExistiam.length,
+    // Só uma amostra -- a lista inteira pode ter milhares de linhas.
+    ja_existiam_amostra: jaExistiam.slice(0, 20),
+    erros,
+    total: itens.length,
+  });
 });
 
 // Lista clientes (paginado, com filtros busca/tag/com_pix/sem_pix)
@@ -564,6 +574,10 @@ router.post('/', async (req, res) => {
     .select()
     .single();
 
+  // 23505 = já existe cliente com este telefone nesta carteira (índice único).
+  if (error?.code === '23505') {
+    return res.status(409).json({ error: 'Já existe um cliente com este telefone nesta carteira.' });
+  }
   if (error) return res.status(500).json({ error: error.message });
 
   // [2026-08] "Upload de faturas avulsas, sem planilha": se já existir um

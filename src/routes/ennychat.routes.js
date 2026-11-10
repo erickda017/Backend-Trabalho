@@ -108,7 +108,7 @@ const buscarClientes = (usuarioId) => async (criterio, valor) => {
 
 const ultimoAnexo = async (usuarioId, idExterno) => {
   const { data } = await supabase
-    .from('ennychat_anexos').select('anexo_id, estado, motivo, atualizado_em')
+    .from('ennychat_anexos').select('anexo_id, estado, motivo, verificacoes, atualizado_em')
     .eq('usuario_id', usuarioId).eq('fatura_externa_id', idExterno)
     .order('atualizado_em', { ascending: false }).limit(1);
   return data?.[0] ?? null;
@@ -253,6 +253,7 @@ router.post('/faturas/:idExterno/anexo', limiteImportacaoArquivo, uploadPdf, asy
       return res.json(resposta(cliente0, 'pendente_revisao', 'alvo_ambiguo', null));
     }
     const aval = avaliarVinculo({ alvo, extraido: lido, pixValido: Boolean(lido.pix) });
+    aval.verificacoes = { ...aval.verificacoes, diag: lido.diag };
 
     if (aval.estado !== 'vinculado') {
       await gravar({ estado: 'pendente_revisao', motivo: aval.motivo, verificacoes: aval.verificacoes });
@@ -307,6 +308,8 @@ router.get('/faturas/:idExterno/estado', async (req, res) => {
       pdf: estadoPdf(anexo),
       pix: Boolean(cliente?.pix_code),
       ultimo_anexo_id: anexo?.anexo_id ?? null,
+      motivo: anexo?.motivo ?? null,
+      verificacoes: anexo?.verificacoes ?? null,
       atualizado_em: anexo?.atualizado_em ?? cliente?.ennychat_status_em ?? null,
     });
   } catch (err) {

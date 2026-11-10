@@ -49,15 +49,20 @@ export async function lerBoletoPdf(bytes) {
   // (aninhar a fila travaria). Texto e Worker entram na fila individualmente.
   {
     let campos = { codigo: null, nome: null, vencimento: null, pixCopiaColaTexto: null };
+    // Diagnóstico SEM dado pessoal (só flags e mensagem curta de erro técnico), devolvido ao site.
+    const diag = { texto: 'ok', worker: 'pulado', pix_qr: false };
     try {
       campos = await executarSequencial(() => lerTexto(bytes));
+      diag.texto = campos.semTexto ? 'sem_texto' : `ok:${['codigo', 'nome', 'vencimento'].filter((k) => campos[k]).join('+') || 'nada'}`;
     } catch (err) {
+      diag.texto = `erro:${String(err.message).slice(0, 60)}`;
       logLimitado('ennychat-texto', 'warn', '[ennychat] leitura de texto do PDF falhou:', err.message);
     }
     // Worker só quando o texto não deu os 3 campos (PDF imagem ou layout fora do padrão).
     if (!campos.codigo || !campos.nome || !campos.vencimento) {
       try {
         const w = await executarSequencial(() => lerPorWorker(bytes));
+        diag.worker = w ? `ok:${['codigo', 'nome', 'vencimento'].filter((k) => w[k]).join('+') || 'nada'}` : 'sem_imagem';
         if (w) {
           campos = {
             ...campos,
@@ -68,6 +73,7 @@ export async function lerBoletoPdf(bytes) {
           };
         }
       } catch (err) {
+        diag.worker = `erro:${String(err.message).slice(0, 60)}`;
         logLimitado('ennychat-worker', 'warn', '[ennychat] Worker de OCR falhou:', err.message);
       }
     }
@@ -77,7 +83,8 @@ export async function lerBoletoPdf(bytes) {
     } catch (err) {
       logLimitado('ennychat-pix', 'warn', '[ennychat] leitura do QR Pix falhou:', err.message);
     }
+    diag.pix_qr = isValidPixPayload(pix);
     if (!isValidPixPayload(pix)) pix = isValidPixPayload(campos.pixCopiaColaTexto) ? campos.pixCopiaColaTexto : null;
-    return { codigo: campos.codigo ?? null, nome: campos.nome ?? null, vencimento: campos.vencimento ?? null, pix };
+    return { codigo: campos.codigo ?? null, nome: campos.nome ?? null, vencimento: campos.vencimento ?? null, pix, diag };
   }
 }

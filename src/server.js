@@ -30,6 +30,7 @@ import perfilRoutes from './routes/perfil.routes.js';
 import supervisorRoutes from './routes/supervisor.routes.js';
 import exclusaoRoutes from './routes/exclusao.routes.js';
 import arquivosRoutes from './routes/arquivos.routes.js';
+import ennychatRoutes from './routes/ennychat.routes.js';
 import faturasPendentesRoutes from './routes/faturasPendentes.routes.js';
 import safrasRoutes from './routes/safras.routes.js';
 import qualidadeRoutes from './routes/qualidade.routes.js';
@@ -192,6 +193,7 @@ app.use('/api/supervisor', requireAuth, requireSupervisor, supervisorRoutes);
 // conseguiria baixar o PDF de qualquer cliente sem estar logado.
 app.use('/api/arquivos', requireAuth, arquivosRoutes);
 app.use('/api/faturas', requireAuth, faturasPendentesRoutes);
+app.use('/api/integracoes/ennychat', requireAuth, ennychatRoutes);
 app.use('/api/safras', requireAuth, safrasRoutes);
 app.use('/api/qualidade', requireAuth, qualidadeRoutes);
 app.use('/api/ativacao-chip', requireAuth, ativacaoChipRoutes);

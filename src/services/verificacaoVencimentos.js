@@ -139,7 +139,7 @@ async function extrairVencimentoDoPdf(pdfPath) {
   return dados?.vencimento || null;
 }
 
-async function renderizarPrimeiraPaginaComoJpeg(bytes) {
+export async function renderizarPrimeiraPaginaComoJpeg(bytes) {
   const [pdfjsLib, { createCanvas }] = await Promise.all([carregarPdfjs(), carregarCanvas()]);
   const fabricaCanvas = criarFabricaCanvas(createCanvas);
 
@@ -184,11 +184,11 @@ async function renderizarPrimeiraPaginaComoJpeg(bytes) {
   }
 }
 
-async function chamarWorker(jpegBuffer) {
+export async function chamarWorker(jpegBuffer) {
   const form = new FormData();
   form.append('file', new Blob([jpegBuffer], { type: 'image/jpeg' }), 'pagina.jpg');
 
-  const resposta = await fetch(WORKER_URL, { method: 'POST', body: form });
+  const resposta = await fetch(WORKER_URL, { method: 'POST', body: form, signal: AbortSignal.timeout(45_000) });
   if (!resposta.ok) throw new Error(`Worker respondeu HTTP ${resposta.status}`);
 
   const json = await resposta.json();

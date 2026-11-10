@@ -4,7 +4,6 @@ import crypto from 'node:crypto';
 import { supabase, BUCKET } from '../lib/supabase.js';
 import { armazenamento } from '../lib/armazenamento.js';
 import { propagarDadosFatura } from '../lib/faturaPropagacao.js';
-import { requireSupervisor } from '../middleware/supervisor.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
 import { limiteImportacaoArquivo } from '../lib/rateLimit.js';
 import { descreverErro } from '../lib/redigir.js';
@@ -52,7 +51,8 @@ router.get('/config', async (req, res) => {
   }
 });
 
-router.put('/config', requireSupervisor, async (req, res) => {
+// Qualquer usuário autenticado edita (decisão do dono: uso pessoal, sem papel de gestão). Para restringir de novo: requireSupervisor aqui.
+router.put('/config', async (req, res) => {
   try {
     const aceitos = req.body?.status_aceitos;
     if (!Array.isArray(aceitos) || aceitos.some((c) => typeof c !== 'string')) {

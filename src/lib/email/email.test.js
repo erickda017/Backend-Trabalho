@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { avaliarElegibilidade, hojeBrt, vencimentoParaIso, diasEntre } from './elegibilidade.js';
-import { renderizarEmail, escapeHtml, formatarValor, mesReferencia, primeiroNome, assuntoFatura } from './modelo.js';
+import { renderizarEmail, escapeHtml, formatarValor, mesReferencia, mensagemFatura, primeiroNome, assuntoFatura } from './modelo.js';
 import { configuracaoBrevo, enviarTransacional, procurarEnvioRecente } from './brevo.js';
 import { aplicarEvento, normalizarMessageId } from './eventos.js';
 import { selecionar, calcularCota, LIMITE_POR_LOTE } from './selecao.js';
@@ -160,3 +160,15 @@ test('cota diária: não deixa reservar mais que o saldo, inclusive com operador
   assert.deepEqual(r.sort(), [false, true]);
   assert.equal(reservados, 200);
 });
+
+test('modelo: texto muda para cliente em atraso (sem "antecedência" nem "antes do vencimento")', () => {
+  const antes = renderizarEmail({ empresa: 'E', primeiro_nome: 'A', mes_referencia: 'M', vencimento: '15/11/2026', valor: 'R$ 1', mensagem: mensagemFatura('2026-11-15', '2026-11-10') });
+  assert.ok(antes.includes('com antecedência'));
+  const hoje = mensagemFatura('2026-11-10', '2026-11-10'); // vence hoje: ainda não é atraso
+  assert.ok(hoje.includes('antecedência'));
+  const atraso = renderizarEmail({ empresa: 'E', primeiro_nome: 'A', mes_referencia: 'M', vencimento: '01/10/2026', valor: 'R$ 1', mensagem: mensagemFatura('2026-10-01', '2026-11-10') });
+  assert.equal(atraso.includes('antecedência'), false);
+  assert.ok(atraso.includes('disponível para consulta'));
+  assert.equal(/\{\{/.test(atraso), false);
+});
+

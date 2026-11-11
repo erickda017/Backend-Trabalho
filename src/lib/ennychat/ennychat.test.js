@@ -102,7 +102,7 @@ test('sync: cliente já amarrado a outra fatura do EnnyChat não é reaproveitad
 });
 
 test('sync: repetir a mesma fatura (já vinculada) não duplica: ação é atualizar', () => {
-  const cliente = { id: 9, nome: 'Maria Fictícia da Silva', telefone: '5511912345678', ennychat_fatura_id: '123', os_numero: '0012345', valor: 150, vencimento: '10/08/2026', email: 'maria@exemplo.com' };
+  const cliente = { id: 9, nome: 'Maria Fictícia da Silva', telefone: '5511912345678', ennychat_fatura_id: '123', os_numero: '0012345', numero_contrato: '0012345', tipo_fatura: 'FPD', valor: 150, vencimento: '10/08/2026', email: 'maria@exemplo.com' };
   const plano = planejarSync({ usuarioId: 'u', fatura, escolha: { tipo: 'unico', cliente }, agora });
   assert.equal(plano.acao, 'atualizar');
   assert.deepEqual(plano.conflitos, []);
@@ -152,3 +152,26 @@ test('texto do cabeçalho: lê Código, Vencimento e nome por rótulo', () => {
   assert.equal(c.vencimento, '10/08/2026');
   assert.equal(c.nome, 'MARIA FICTICIA DA SILVA');
 });
+
+test('campos que o site recebia da lista crua: contrato (= OS), tipo da fatura pela posição e prazo', () => {
+  const r = validarFatura(corpo({ posicao: 2, prazo_data: '2026-12-09' }));
+  assert.equal(r.fatura.tipo_fatura, 'SPD');
+  assert.equal(r.fatura.data_prazo, '2026-12-09');
+  assert.equal(validarFatura(corpo({ posicao: 1 })).fatura.tipo_fatura, 'FPD');
+  assert.equal(validarFatura(corpo({ posicao: 3 })).fatura.tipo_fatura, null);
+  assert.equal(validarFatura(corpo({ prazo_data: '2026-02-31' })).fatura.data_prazo, null); // data inexistente não entra
+  const plano = planejarSync({ usuarioId: 'u', fatura: r.fatura, escolha: { tipo: 'nenhum' }, agora: '2026-11-10T00:00:00.000Z' });
+  assert.equal(plano.linha.numero_contrato, '0012345'); // a OS também é o contrato (casamento de Pix/pagos e safras)
+  assert.equal(plano.linha.tipo_fatura, 'SPD');
+  assert.equal(plano.linha.data_prazo, '2026-12-09');
+  assert.equal(plano.linha.importado_em, '2026-11-10T00:00:00.000Z');
+  // cliente que veio da lista crua (contrato preenchido, sem os_numero): preenche o que falta, sem sobrescrever
+  const existente = { id: 9, nome: 'Maria Fictícia da Silva', telefone: '5511912345678', ennychat_fatura_id: '123', os_numero: null, numero_contrato: null, tipo_fatura: null, data_prazo: null, valor: 150, vencimento: '10/08/2026', email: 'maria@exemplo.com' };
+  const p2 = planejarSync({ usuarioId: 'u', fatura: r.fatura, escolha: { tipo: 'unico', por: 'ennychat_fatura_id', cliente: existente }, agora });
+  assert.equal(p2.camposFatura.numero_contrato, '0012345');
+  assert.equal(p2.camposFatura.tipo_fatura, 'SPD');
+  assert.equal(p2.camposFatura.data_prazo, '2026-12-09');
+  assert.equal(validarCamposAnexo({ anexo_id: '1', status_operador: 'A', origem: 'upload' }).origem, 'upload');
+  assert.equal(validarCamposAnexo({ anexo_id: '1', status_operador: 'A' }).origem, 'download');
+});
+

@@ -12,6 +12,12 @@ const MAX_ALTERNATIVOS = 10;
 // OS vira valor de filtro no banco: só caracteres de OS (outro formato => sem OS, nunca chuta).
 const osValida = (v) => (v && /^[0-9A-Za-z/._-]+$/.test(v) ? v : null);
 
+// "AAAA-MM-DD" de calendário real (coluna `date` do banco); senão null.
+const dataIsoValida = (v) => {
+  const m = typeof v === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(v.trim()) : null;
+  return m && formatarDataCivil(Number(m[1]), Number(m[2]), Number(m[3])) ? v.trim() : null;
+};
+
 export const idExternoValido = (v) => typeof v === 'string' && ID_EXTERNO_RE.test(v);
 
 const textoOuNull = (v, max) => {
@@ -126,6 +132,9 @@ export function validarFatura(body) {
       id_externo: idExterno,
       status_operador: status,
       os_numero: osValida(textoOuNull(f.venda_os, 50)), // texto: zeros à esquerda preservados
+      // Campos que o site recebia da lista crua: contrato (= OS), tipo da fatura (1ª = FPD, 2ª = SPD) e prazo (safra).
+      tipo_fatura: f.posicao === 1 ? 'FPD' : f.posicao === 2 ? 'SPD' : null,
+      data_prazo: dataIsoValida(f.prazo_data),
       nome,
       email,
       telefone,
@@ -152,7 +161,8 @@ export function validarCamposAnexo(campos) {
   if (!valor.ok) return { ok: false, campo: 'valor' };
   const venc = converterVencimento(campos.vencimento);
   if (!venc.ok) return { ok: false, campo: 'vencimento' };
-  return { ok: true, anexoId, statusOperador: status, valor: valor.valor, vencimento: venc.valor };
+  const origem = campos.origem === 'upload' ? 'upload' : 'download'; // 'upload' = original enviado pelo operador (maior qualidade)
+  return { ok: true, anexoId, statusOperador: status, valor: valor.valor, vencimento: venc.valor, origem };
 }
 
 // Itens de POST /catalogo -> lista saneada (descarta item inválido), ou null se o formato for inválido.

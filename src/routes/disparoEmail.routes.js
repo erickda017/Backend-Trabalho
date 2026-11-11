@@ -137,6 +137,41 @@ router.post('/lotes', limiteSensivel, async (req, res) => {
   }
 });
 
+// Painel de engajamento: quantos receberam, abriram, clicaram, devolveram -- dos envios do operador nos últimos N dias.
+router.get('/resumo', async (req, res) => {
+  try {
+    const dias = Math.min(Math.max(Number(req.query.dias) || 30, 1), 365);
+    const desde = new Date(Date.now() - dias * 86_400_000).toISOString();
+    const { data, error } = await supabase.from('email_envios')
+      .select('cliente_id, email, status, aceito_em, aberturas, primeira_abertura_em, cliques, clique_em, atualizado_em')
+      .eq('usuario_id', req.user.id).not('aceito_em', 'is', null).gte('aceito_em', desde).order('aceito_em', { ascending: false }).limit(5000);
+    if (error) throw error;
+    const l = data || [];
+    const entregues = l.filter((e) => e.status === 'entregue' || e.aberturas > 0).length;
+    const abertos = l.filter((e) => e.aberturas > 0).length;
+    const nomes = new Map();
+    const recentes = l.slice(0, 15);
+    const ids = [...new Set(recentes.map((e) => e.cliente_id).filter(Boolean))];
+    if (ids.length) {
+      const { data: cs } = await supabase.from('clientes').select('id, nome').in('id', ids).eq('usuario_id', req.user.id);
+      for (const c of cs || []) nomes.set(c.id, c.nome);
+    }
+    res.json({
+      dias,
+      enviados: l.length, // aceitos pela Brevo
+      entregues,
+      abertos,
+      clicaram: l.filter((e) => e.cliques > 0).length,
+      devolvidos: l.filter((e) => e.status === 'devolvido').length,
+      falhas: l.filter((e) => e.status === 'falhou').length,
+      taxa_abertura: entregues ? Math.round((abertos / entregues) * 100) : null,
+      recentes: recentes.map((e) => ({ nome: nomes.get(e.cliente_id) ?? null, email: e.email, status: e.status, aceito_em: e.aceito_em, abriu: e.aberturas > 0, aberturas: e.aberturas, primeira_abertura_em: e.primeira_abertura_em, clicou: e.cliques > 0 })),
+    });
+  } catch (err) {
+    erro500(res, err, 'resumo');
+  }
+});
+
 const CONTAGENS = ['na_fila', 'processando', 'aceito', 'entregue', 'devolvido', 'falhou', 'cancelado'];
 
 async function resumoLote(lote) {

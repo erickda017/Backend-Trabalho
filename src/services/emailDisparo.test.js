@@ -337,7 +337,7 @@ test('webhook: exige segredo; entrega e devolução; duplicata e evento antigo n
   const agora = Math.floor(Date.now() / 1000);
   linhas(db, 'email_envios').push(
     { id: 'e1', lote_id: 'L', usuario_id: 'u1', cliente_id: 'u1-c1', status: 'aceito', message_id: '<m-1@smtp>', evento_em: null, tentativas: 1 },
-    { id: 'e2', lote_id: 'L', usuario_id: 'u1', cliente_id: 'u1-c2', status: 'aceito', message_id: '<m-2@smtp>', evento_em: null, tentativas: 1 },
+    { id: 'e2', lote_id: 'L', usuario_id: 'u1', cliente_id: 'u1-c2', email: 'u1-c2@exemplo.com', status: 'aceito', message_id: '<m-2@smtp>', evento_em: null, tentativas: 1 },
   );
   const s = await servir();
   const auth = { authorization: 'Bearer segredo-do-webhook' };
@@ -351,3 +351,32 @@ test('webhook: exige segredo; entrega e devolução; duplicata e evento antigo n
   assert.equal((await s.chamar('POST', '/api/webhooks/brevo?token=segredo-do-webhook', { event: 'opened', 'message-id': '<m-1@smtp>' })).status, 200); // token também aceito na URL
   await s.fechar();
 });
+
+test('webhook + painel: abriu/clicou contam sem mexer na entrega; resumo agrega envios do operador', async () => {
+  const db = cenario({ porUsuario: 3 });
+  const agoraIso = new Date().toISOString();
+  const ts = Math.floor(Date.now() / 1000);
+  linhas(db, 'email_envios').push(
+    { id: 'e1', lote_id: 'L', usuario_id: 'u1', cliente_id: 'u1-c1', email: 'u1-c1@exemplo.com', status: 'entregue', message_id: '<m-1@smtp>', aceito_em: agoraIso, aberturas: 0, cliques: 0, tentativas: 1 },
+    { id: 'e2', lote_id: 'L', usuario_id: 'u1', cliente_id: 'u1-c2', status: 'aceito', message_id: '<m-2@smtp>', aceito_em: agoraIso, aberturas: 0, cliques: 0, tentativas: 1 },
+    { id: 'e3', lote_id: 'L', usuario_id: 'u1', cliente_id: 'u1-c3', email: 'u1-c3@exemplo.com', status: 'devolvido', message_id: '<m-3@smtp>', aceito_em: agoraIso, aberturas: 0, cliques: 0, tentativas: 1 },
+    { id: 'x9', lote_id: 'L', usuario_id: 'u2', cliente_id: 'u2-c1', status: 'entregue', message_id: '<m-9@smtp>', aceito_em: agoraIso, aberturas: 5, cliques: 0, tentativas: 1 }, // outro operador
+  );
+  const s = await servir();
+  const auth = { authorization: 'Bearer segredo-do-webhook' };
+  await s.chamar('POST', '/api/webhooks/brevo', [
+    { event: 'opened', 'message-id': '<m-1@smtp>', ts }, { event: 'opened', 'message-id': '<m-1@smtp>', ts: ts + 5 }, { event: 'click', 'message-id': '<m-1@smtp>', ts: ts + 6 },
+    { event: 'opened', 'message-id': '<m-2@smtp>', ts }, // abrir implica que foi entregue
+  ], 'u1', auth);
+  const por = Object.fromEntries(linhas(db, 'email_envios').map((e) => [e.id, e]));
+  assert.deepEqual([por.e1.status, por.e1.aberturas, por.e1.cliques], ['entregue', 2, 1]);
+  assert.deepEqual([por.e2.status, por.e2.aberturas], ['entregue', 1]);
+  const r = await s.chamar('GET', '/api/disparo-email/resumo');
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.json.enviados, r.json.entregues, r.json.abertos, r.json.clicaram, r.json.devolvidos], [3, 2, 2, 1, 1]); // só do operador u1
+  assert.equal(r.json.taxa_abertura, 100);
+  assert.equal(r.json.recentes.find((x) => x.email === 'u1-c1@exemplo.com').abriu, true);
+  assert.equal(r.json.recentes.length, 3);
+  await s.fechar();
+});
+

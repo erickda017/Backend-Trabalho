@@ -12,6 +12,7 @@ import { avaliarStatus, idExternoValido, pagoOuEncerrado, validarCamposAnexo, va
 import { escolherCliente, planejarSync } from '../lib/ennychat/cliente.js';
 import { avaliarVinculo, ehPdf } from '../lib/ennychat/vinculo.js';
 import { lerBoletoPdf } from '../services/ennychatPdf.js';
+import { persistirExtracaoPix } from '../lib/pixPersistencia.js';
 
 // Integração EnnyChat (recebimento). Contrato: ENNYCHAT_CONTRATO.md (raiz do projeto).
 // Tudo escopado por req.user.id; `responsavel` do EnnyChat nunca é usado.
@@ -116,6 +117,32 @@ const ultimoAnexo = async (usuarioId, idExterno) => {
 
 const estadoPdf = (anexo) => anexo?.estado ?? 'aguardando';
 
+// O Pix também precisa aparecer na aba "Extrator de PIX" (a planilha do supervisor é atualizada a partir de pix_extracoes).
+// Idempotente: reprocessar o mesmo boleto não cria linha repetida. Nunca derruba o vínculo (só registra o erro).
+async function registrarNaAbaPix({ usuarioId, cliente, lido }) {
+  try {
+    const { data: ja } = await supabase.from('pix_extracoes').select('id').eq('usuario_id', usuarioId).eq('pix_code', lido.pix).limit(1);
+    if (ja?.length) {
+      await supabase.from('pix_extracoes').update({ cliente_id: cliente.id, codigo: lido.codigo, nome: lido.nome }).eq('id', ja[0].id).eq('usuario_id', usuarioId);
+      return;
+    }
+    await persistirExtracaoPix({
+      usuarioId,
+      arquivo: `${cliente.nome ?? 'boleto'}.pdf`.slice(0, 120),
+      pixCopiaCola: lido.pix,
+      valor: null, // o valor vem do EnnyChat, não do PDF
+      vencimento: lido.vencimento ?? cliente.vencimento ?? null,
+      linhaDigitavel: lido.linhaDigitavel ?? null,
+      clienteId: cliente.id,
+      codigo: lido.codigo,
+      nome: lido.nome,
+      origem: 'ennychat',
+    });
+  } catch (err) {
+    logLimitado('ennychat-aba-pix', 'error', '[ennychat] registrar Pix na aba Extrator:', descreverErro(err));
+  }
+}
+
 // ---------- POST /faturas/sync ----------
 router.post('/faturas/sync', limiteImportacaoArquivo, async (req, res) => {
   try {
@@ -164,6 +191,9 @@ router.post('/faturas/sync', limiteImportacaoArquivo, async (req, res) => {
       criado,
       conflitos: plano.acao === 'atualizar' ? plano.conflitos : [],
       pdf: estadoPdf(anexo),
+      ultimo_anexo_id: anexo?.anexo_id ?? null, // a extensão só baixa/envia o PDF se este anexo ainda não foi vinculado
+      pdf_motivo: anexo?.motivo ?? null,
+      pdf_atualizado_em: anexo?.atualizado_em ?? null,
       pix: Boolean(cliente.pix_code),
     });
   } catch (err) {
@@ -213,9 +243,10 @@ router.post('/faturas/:idExterno/anexo', limiteImportacaoArquivo, uploadPdf, asy
       const idade = Date.now() - new Date(existente.atualizado_em).getTime();
       // Vinculado e processando recente = resultado salvo. Pendência é reavaliada (o cadastro pode ter
       // sido corrigido), com intervalo mínimo para não repetir OCR a cada abertura da ficha.
+      // O arquivo ORIGINAL que o operador subiu (campos.origem = 'upload') tem prioridade: sempre reavalia uma pendência.
       const reprocessar =
         existente.cliente_id !== cliente0.id ||
-        (existente.estado === 'pendente_revisao' && idade > REPROCESSAR_PENDENTE_APOS_MS) ||
+        (existente.estado === 'pendente_revisao' && (idade > REPROCESSAR_PENDENTE_APOS_MS || campos.origem === 'upload')) ||
         (existente.estado === 'processando' && idade > REPROCESSAR_PROCESSANDO_APOS_MS);
       if (!reprocessar) return res.json(resposta(cliente0, existente.estado, existente.motivo, existente.verificacoes, { repetido: true }));
       linhaId = existente.id;
@@ -269,6 +300,7 @@ router.post('/faturas/:idExterno/anexo', limiteImportacaoArquivo, uploadPdf, asy
     const r = await propagarDadosFatura(alvo.id, usuarioId, { pdf_path: pdfPath, pdf_atualizado_em: new Date().toISOString(), pix_code: lido.pix });
     if (r.error) throw r.error;
     await gravar({ estado: 'vinculado', motivo: null, verificacoes: aval.verificacoes, pdf_path: pdfPath, cliente_id: alvo.id });
+    await registrarNaAbaPix({ usuarioId, cliente: alvo, lido });
     return res.json(resposta(alvo, 'vinculado', null, aval.verificacoes));
     } catch (err) {
       // Falha depois do insert (storage, banco): não deixa a linha presa em 'processando'.

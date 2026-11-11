@@ -6,8 +6,8 @@ import { supabase, BUCKET } from '../lib/supabase.js';
 import { armazenamento } from '../lib/armazenamento.js';
 import { logLimitado } from '../lib/log.js';
 import { descreverErro } from '../lib/redigir.js';
-import { avaliarElegibilidade, vencimentoParaIso } from '../lib/email/elegibilidade.js';
-import { renderizarEmail, formatarValor, formatarDataIso, mesReferencia, primeiroNome, assuntoFatura } from '../lib/email/modelo.js';
+import { avaliarElegibilidade, hojeBrt, vencimentoParaIso } from '../lib/email/elegibilidade.js';
+import { renderizarEmail, formatarValor, formatarDataIso, mesReferencia, mensagemFatura, primeiroNome, assuntoFatura } from '../lib/email/modelo.js';
 import { configuracaoBrevo, enviarTransacional, procurarEnvioRecente } from '../lib/email/brevo.js';
 import { lerConfigEmail } from '../lib/email/dados.js';
 import { MOTIVOS_INCERTOS } from '../lib/email/constantes.js';
@@ -104,7 +104,7 @@ async function processarItem(item, lote, deps) {
   const iso = vencimentoParaIso(c.vencimento);
   const mes = mesReferencia(iso);
   const assunto = assuntoFatura(mes);
-  const html = renderizarEmail({ empresa: lote.nome_empresa, primeiro_nome: primeiroNome(c.nome), mes_referencia: mes, vencimento: formatarDataIso(iso), valor: formatarValor(c.valor) });
+  const html = renderizarEmail({ empresa: lote.nome_empresa, primeiro_nome: primeiroNome(c.nome), mes_referencia: mes, vencimento: formatarDataIso(iso), valor: formatarValor(c.valor), mensagem: mensagemFatura(iso, hojeBrt()) });
   const pedido = { cfg, para: c.email.trim(), assunto, html, anexoNome: 'fatura.pdf', anexoBase64: bytes.toString('base64') };
 
   let tentativas = item.tentativas;

@@ -3,7 +3,10 @@ import crypto from 'node:crypto';
 import { supabase } from '../lib/supabase.js';
 import { descreverErro } from '../lib/redigir.js';
 import { logLimitado } from '../lib/log.js';
-import { aplicarEvento, normalizarMessageId } from '../lib/email/eventos.js';
+import { aplicarEvento, instanteDoEvento, normalizarMessageId } from '../lib/email/eventos.js';
+
+const ABERTURA = new Set(['opened', 'unique_opened', 'proxy_open', 'first_opening']);
+const CLIQUE = new Set(['click', 'clicks']);
 
 // Webhook transacional da Brevo (rota PÚBLICA, sem login): autenticada por segredo compartilhado
 // (BREVO_WEBHOOK_TOKEN) no header `Authorization: Bearer <token>` ou em `?token=` na URL cadastrada na Brevo.
@@ -27,9 +30,27 @@ router.post('/', async (req, res) => {
     for (const ev of eventos) {
       const mid = normalizarMessageId(ev['message-id'] ?? ev.messageId);
       if (!mid) continue;
-      const { data: envio } = await supabase.from('email_envios').select('id, status, evento_em')
-        .in('message_id', [mid, `<${mid}>`]).limit(1).maybeSingle();
+      const ids = [mid, `<${mid}>`];
+      let { data: envio, error: erroLeitura } = await supabase.from('email_envios').select('id, status, evento_em, aberturas, primeira_abertura_em, cliques')
+        .in('message_id', ids).limit(1).maybeSingle();
+      // migration-32 ainda não rodou (colunas de engajamento inexistentes): segue só com entrega/devolução.
+      if (erroLeitura && (erroLeitura.code === '42703' || erroLeitura.code === 'PGRST204' || /aberturas|cliques/.test(erroLeitura.message ?? ''))) {
+        ({ data: envio } = await supabase.from('email_envios').select('id, status, evento_em').in('message_id', ids).limit(1).maybeSingle());
+        if (envio) envio.semEngajamento = true;
+      }
       if (!envio) continue; // evento de e-mail que este sistema não enviou
+      // Engajamento (não muda o estado de entrega, só conta). Abrir implica que foi entregue.
+      const tipo = String(ev.event ?? '').toLowerCase();
+      if (ABERTURA.has(tipo) || CLIQUE.has(tipo)) {
+        if (envio.semEngajamento) continue;
+        const quando = new Date(instanteDoEvento(ev) ?? Date.now()).toISOString();
+        const campos = ABERTURA.has(tipo)
+          ? { aberturas: (envio.aberturas ?? 0) + 1, primeira_abertura_em: envio.primeira_abertura_em ?? quando }
+          : { cliques: (envio.cliques ?? 0) + 1, clique_em: quando };
+        if (envio.status === 'aceito') campos.status = 'entregue';
+        await supabase.from('email_envios').update({ ...campos, atualizado_em: new Date().toISOString() }).eq('id', envio.id);
+        continue;
+      }
       const novo = aplicarEvento(envio, ev);
       if (!novo) continue;
       await supabase.from('email_envios')

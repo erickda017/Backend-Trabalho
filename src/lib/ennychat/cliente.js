@@ -14,6 +14,7 @@ export async function escolherCliente(fatura, buscar) {
   const consultas = [
     ['ennychat_fatura_id', fatura.id_externo],
     ['os_numero', fatura.os_numero],
+    ['numero_contrato', fatura.os_numero], // clientes vindos da lista crua guardam a OS como contrato
     ['telefone', fatura.telefone ? normalizarVariantes(fatura.telefone) : null],
   ];
   for (const [criterio, valor] of consultas) {
@@ -49,6 +50,10 @@ export function planejarSync({ usuarioId, fatura, escolha, agora }) {
         telefone: fatura.telefone,
         email: fatura.email,
         os_numero: fatura.os_numero,
+        numero_contrato: fatura.os_numero,
+        tipo_fatura: fatura.tipo_fatura,
+        data_prazo: fatura.data_prazo,
+        importado_em: agora,
         valor: fatura.valor,
         vencimento: fatura.vencimento,
         ennychat_fatura_id: fatura.id_externo,
@@ -96,6 +101,9 @@ export function planejarSync({ usuarioId, fatura, escolha, agora }) {
   preencher(campos, 'ennychat_fatura_id', fatura.id_externo);
   if (temAlternativos(fatura.alternativos)) preencher(campos, 'contatos_alternativos', fatura.alternativos);
   preencher(camposFatura, 'valor', fatura.valor);
+  preencher(camposFatura, 'numero_contrato', fatura.os_numero);
+  preencher(camposFatura, 'tipo_fatura', fatura.tipo_fatura);
+  preencher(camposFatura, 'data_prazo', fatura.data_prazo);
   preencher(camposFatura, 'vencimento', fatura.vencimento);
 
   return { acao: 'atualizar', cliente: c, campos, camposFatura, conflitos };

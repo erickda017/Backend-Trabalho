@@ -105,7 +105,7 @@ export async function lerBoletoPdf(bytes) {
   // Sem executarSequencial aqui: extrairPixDeArquivoNoServidor já enfileira por conta própria
   // (aninhar a fila travaria). Texto e Worker entram na fila individualmente.
   {
-    let campos = { codigo: null, nome: null, vencimento: null, pixCopiaColaTexto: null };
+    let campos = { codigo: null, nome: null, vencimento: null, pixCopiaColaTexto: null, linhaDigitavel: null };
     // Diagnóstico SEM dado pessoal (só flags e mensagem curta de erro técnico), devolvido ao site.
     const diag = { texto: 'ok', worker: 'pulado', pix_qr: false };
     try {
@@ -127,6 +127,7 @@ export async function lerBoletoPdf(bytes) {
             nome: campos.nome ?? w.nome ?? null,
             vencimento: campos.vencimento ?? w.vencimento ?? null,
             pixCopiaColaTexto: campos.pixCopiaColaTexto ?? w.pixCopiaCola ?? null,
+            linhaDigitavel: campos.linhaDigitavel ?? w.linhaDigitavel ?? null,
           };
         }
       } catch (err) {
@@ -142,6 +143,6 @@ export async function lerBoletoPdf(bytes) {
     }
     diag.pix_qr = isValidPixPayload(pix);
     if (!isValidPixPayload(pix)) pix = isValidPixPayload(campos.pixCopiaColaTexto) ? campos.pixCopiaColaTexto : null;
-    return { codigo: campos.codigo ?? null, nome: campos.nome ?? null, vencimento: campos.vencimento ?? null, pix, diag };
+    return { codigo: campos.codigo ?? null, nome: campos.nome ?? null, vencimento: campos.vencimento ?? null, linhaDigitavel: campos.linhaDigitavel ?? null, pix, diag };
   }
 }

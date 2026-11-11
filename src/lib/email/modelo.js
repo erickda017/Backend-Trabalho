@@ -35,9 +35,16 @@ export function primeiroNome(nome) {
   return p ? p[0].toLocaleUpperCase('pt-BR') + p.slice(1).toLocaleLowerCase('pt-BR') : 'cliente';
 }
 
-/** Renderiza o e-mail. `dados`: { empresa, primeiro_nome, mes_referencia, vencimento, valor } (texto puro; é escapado aqui). */
+const MENSAGEM_ANTES = 'Enviamos sua fatura com antecedência para você consultá-la antes do vencimento.';
+const MENSAGEM_ATRASO = 'Sua fatura está disponível para consulta. Confira o vencimento e as opções de pagamento no PDF anexado.';
+
+/** Frase do e-mail conforme a situação: vencimento já passou (atraso) ou ainda não. Datas "AAAA-MM-DD". */
+export const mensagemFatura = (vencimentoIso, hojeIso) => (vencimentoIso && hojeIso && vencimentoIso < hojeIso ? MENSAGEM_ATRASO : MENSAGEM_ANTES);
+
+/** Renderiza o e-mail. `dados`: { empresa, primeiro_nome, mes_referencia, vencimento, valor, mensagem } (texto puro; é escapado aqui). */
 export function renderizarEmail(dados) {
-  return modelo().replace(/\{\{\s*params\.(\w+)\s*\}\}/g, (_, chave) => escapeHtml(dados?.[chave] ?? ''));
+  const d = { mensagem: MENSAGEM_ANTES, ...dados };
+  return modelo().replace(/\{\{\s*params\.(\w+)\s*\}\}/g, (_, chave) => escapeHtml(d[chave] ?? ''));
 }
 
 export const assuntoFatura = (mes) => `Sua fatura Claro${mes ? ` de ${mes}` : ''}`;

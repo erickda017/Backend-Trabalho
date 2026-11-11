@@ -4,7 +4,7 @@
 let contador = 0;
 const novoId = () => `00000000-0000-4000-8000-${String(++contador).padStart(12, '0')}`;
 
-export function criarSupabaseFalso({ tabelas = {}, restricoes = {} } = {}) {
+export function criarSupabaseFalso({ tabelas = {}, restricoes = {}, tabelasAusentes = [] } = {}) {
   const dados = Object.fromEntries(Object.entries(tabelas).map(([k, v]) => [k, v.map((l) => ({ ...l }))]));
   const tab = (nome) => (dados[nome] ??= []);
 
@@ -24,12 +24,22 @@ export function criarSupabaseFalso({ tabelas = {}, restricoes = {} } = {}) {
       select(_cols, o) { if (op === 'select') opcoes = o ?? {}; else retornar = true; return q; },
       insert(p) { op = 'insert'; payload = Array.isArray(p) ? p : [p]; return q; },
       update(p) { op = 'update'; payload = p; return q; },
-      upsert(p, o) { op = 'upsert'; payload = [p]; conflito = o?.onConflict; return q; },
+      upsert(p, o) { op = 'upsert'; payload = Array.isArray(p) ? p : [p]; conflito = o?.onConflict; return q; },
       delete() { op = 'delete'; return q; },
       eq(c, v) { filtros.push((l) => l[c] === v); return q; },
       neq(c, v) { filtros.push((l) => l[c] !== v); return q; },
       in(c, vs) { filtros.push((l) => vs.includes(l[c])); return q; },
       is(c, v) { filtros.push((l) => (v === null ? l[c] == null : l[c] === v)); return q; },
+      // "col.is.null,col.eq.valor" (qualquer uma casa). Só is/eq: o que as rotas usam.
+      or(expr) {
+        const cond = String(expr).split(',').map((t) => {
+          const [c, o, ...r] = t.split('.');
+          const v = r.join('.');
+          return (l) => (o === 'is' ? (v === 'null' ? l[c] == null : String(l[c]) === v) : String(l[c]) === v);
+        });
+        filtros.push((l) => cond.some((f) => f(l)));
+        return q;
+      },
       not(c, o, v) { if (o === 'is' && v === null) filtros.push((l) => l[c] != null); return q; },
       gte(c, v) { filtros.push((l) => l[c] != null && String(l[c]) >= String(v)); return q; },
       order(c, o) { ordens.push([c, o?.ascending === false ? -1 : 1]); return q; },
@@ -45,6 +55,7 @@ export function criarSupabaseFalso({ tabelas = {}, restricoes = {} } = {}) {
     }
 
     function executar() {
+      if (tabelasAusentes.includes(nomeTabela)) return { data: null, error: { code: '42P01', message: 'relation does not exist' } };
       const T = tab(nomeTabela);
       const casa = (l) => filtros.every((f) => f(l));
       if (op === 'insert') {
@@ -60,9 +71,11 @@ export function criarSupabaseFalso({ tabelas = {}, restricoes = {} } = {}) {
         return fim(retornar ? criados : null);
       }
       if (op === 'upsert') {
-        const p = payload[0];
-        const i = T.findIndex((l) => l[conflito] === p[conflito]);
-        if (i >= 0) Object.assign(T[i], p); else T.push({ id: novoId(), ...p });
+        const colunas = String(conflito).split(',');
+        for (const p of payload) {
+          const i = T.findIndex((l) => colunas.every((c) => l[c] === p[c]));
+          if (i >= 0) Object.assign(T[i], p); else T.push({ id: novoId(), ...p });
+        }
         return { data: null, error: null };
       }
       if (op === 'update') {

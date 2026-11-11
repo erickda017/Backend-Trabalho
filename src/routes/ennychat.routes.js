@@ -136,6 +136,7 @@ const clientePorFatura = async (usuarioId, idExterno) => {
 
 // migration-33 (operadora + ennychat_faturas): o código tolera ela ainda não ter rodado (só deixa de usar os recursos novos).
 let m33Cache = { ok: null, em: 0 };
+export const __reiniciarM33 = () => { m33Cache = { ok: null, em: 0 }; }; // só para testes
 async function temM33() {
   if (m33Cache.ok === true) return true;
   if (m33Cache.ok === false && Date.now() - m33Cache.em < 60_000) return false;
@@ -207,10 +208,11 @@ async function registrarStatusConhecido(usuarioId, idExterno, status, { mapear =
   try {
     const agora = new Date().toISOString();
     const espelho = mapear ? STATUS_SISTEMA[status] : null;
-    await supabase.from('clientes').update({
-      ennychat_status: status.slice(0, 100), ennychat_status_em: agora,
-      ...(espelho ? { status_operador: espelho, status_operador_atualizado_em: agora } : {}),
-    }).eq('usuario_id', usuarioId).eq('ennychat_fatura_id', idExterno);
+    const base = { ennychat_status: status.slice(0, 100), ennychat_status_em: agora };
+    const r = await supabase.from('clientes').update({ ...base, ...(espelho ? { status_operador: espelho, status_operador_atualizado_em: agora } : {}) })
+      .eq('usuario_id', usuarioId).eq('ennychat_fatura_id', idExterno);
+    // O banco deste usuário pode não aceitar o status espelho (CHECK de clientes.status_operador): grava ao menos o status do EnnyChat.
+    if (r?.error && espelho) await supabase.from('clientes').update(base).eq('usuario_id', usuarioId).eq('ennychat_fatura_id', idExterno);
   } catch (err) {
     logLimitado('ennychat-status-conhecido', 'error', '[ennychat] registrar status:', descreverErro(err));
   }
@@ -309,8 +311,16 @@ async function sincronizarFatura(usuarioId, fatura, aceitos, { m33, preCliente =
     if (error?.code === '23505') {
       // Corrida/duplicata (mesma fatura ou mesmo telefone): relê; se for a mesma fatura, é idempotência.
       const existente = await clientePorFatura(usuarioId, fatura.id_externo);
-      if (!existente) return { ...base, estado: 'pendente_revisao', motivo: 'alvo_ambiguo' };
-      cliente = existente;
+      if (existente) cliente = existente;
+      else if (plano.linha.numero_contrato) {
+        // O contrato é único por usuário, mas a MESMA OS existe em operadoras diferentes (BG x Mega): cadastra sem o contrato
+        // (a OS continua em os_numero). Se ainda assim colidir (telefone repetido), fica pendente e nada é misturado.
+        const r2 = await supabase.from('clientes').insert({ ...plano.linha, numero_contrato: null }).select('*').single();
+        if (r2.error?.code === '23505') return { ...base, estado: 'pendente_revisao', motivo: 'alvo_ambiguo' };
+        if (r2.error) throw r2.error;
+        cliente = r2.data;
+        criado = true;
+      } else return { ...base, estado: 'pendente_revisao', motivo: 'alvo_ambiguo' };
     } else if (error) throw error;
     else { cliente = data; criado = true; }
   } else {
@@ -335,11 +345,15 @@ async function sincronizarFatura(usuarioId, fatura, aceitos, { m33, preCliente =
   if (m33) await gravarFaturas(usuarioId, cliente, fatura);
 
   // Operadora sem PDF (Desktop): o Pix digitado no EnnyChat passa a ser o Pix do cliente (validado: CRC).
+  // Espelha o EnnyChat: se o operador trocou o Pix, o sistema troca; se o removeu, o sistema também remove (nunca manda Pix velho).
   const pixSite = isValidPixPayload(fatura.codigo_pix);
-  if (pixSite && OPERADORAS_SEM_PDF.has(fatura.operadora) && cliente.pix_code !== fatura.codigo_pix) {
-    const r = await propagarDadosFatura(cliente.id, usuarioId, { pix_code: fatura.codigo_pix });
-    if (r.error) throw r.error;
-    cliente = { ...cliente, pix_code: fatura.codigo_pix };
+  if (OPERADORAS_SEM_PDF.has(fatura.operadora)) {
+    const novo = pixSite ? fatura.codigo_pix : null;
+    if ((cliente.pix_code ?? null) !== novo) {
+      const r = await propagarDadosFatura(cliente.id, usuarioId, { pix_code: novo });
+      if (r.error) throw r.error;
+      cliente = { ...cliente, pix_code: novo };
+    }
   }
 
   const anexo = await ultimoAnexo(usuarioId, fatura.id_externo);

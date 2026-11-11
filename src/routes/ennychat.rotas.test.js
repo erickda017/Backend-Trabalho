@@ -31,11 +31,12 @@ const RESTRICOES = {
   ],
 };
 
-function banco({ clientes = [], faturas = [], anexos = [], aceitos = ['fatura_encaminhada'], ausentes = [], tokens = [] } = {}) {
+function banco({ clientes = [], faturas = [], anexos = [], aceitos = ['fatura_encaminhada'], ausentes = [], tokens = [], colunasAusentes = {} } = {}) {
   const falso = criarSupabaseFalso({
     tabelas: { clientes, ennychat_faturas: faturas, ennychat_anexos: anexos, extensao_tokens: tokens, perfis: [], ennychat_config: [{ chave: 'status_aceitos', valor: aceitos }, { chave: 'catalogo', valor: [] }] },
     restricoes: RESTRICOES,
     tabelasAusentes: ausentes,
+    colunasAusentes,
   });
   __usarClienteDeTeste(falso);
   return falso;
@@ -322,5 +323,25 @@ test('Claro (com PDF): Pix do site NÃO sobrescreve o Pix do PDF vinculado', asy
     await sync(s.chamar, fatura({ id_externo: '1400', venda_os: '1400', operadora_slug: 'claro-fenix', cliente_telefone: t, codigo_pix: PIX_B, faturas: [{ id: '1400', posicao: 1, vencimento: '2026-12-09', valor: '89.99', status_pagamento: 'pendente', codigo_pix: PIX_B }] }));
     assert.equal(db.__dados.clientes[0].pix_code, PIX_A); // o do PDF vale
     assert.equal(db.__dados.ennychat_faturas[0].pix_code, PIX_B); // o do site fica só no registro da fatura
+  } finally { s.fechar(); }
+});
+
+test('banco SEM colunas de migrations antigas (importado_em, tipo_fatura, data_prazo): cadastra cliente novo mesmo assim (era o 500 em produção)', async () => {
+  const db = banco({ colunasAusentes: { clientes: ['importado_em', 'tipo_fatura', 'data_prazo'] } });
+  const s = await servidor(db);
+  try {
+    const r = await sync(s.chamar, fatura({ id_externo: '1500', venda_os: '1500', codigo_pix: PIX_A, faturas: [{ id: '1500', posicao: 1, vencimento: '2026-12-09', valor: '89.99', status_pagamento: 'pendente', codigo_pix: PIX_A }] }));
+    assert.equal(r.status, 200);
+    assert.equal(r.json.estado, 'sincronizado');
+    assert.equal(r.json.criado, true);
+    const c = db.__dados.clientes[0];
+    assert.equal(c.nome, 'FULANO DE TAL');
+    assert.equal(c.ennychat_fatura_id, '1500');
+    assert.equal('importado_em' in c, false);
+    assert.equal(c.pix_code, PIX_A);
+    const l = await lote(s.chamar, [fatura({ id_externo: '1501', venda_os: '1501', cliente_telefone: tel() })]);
+    assert.equal(l.json.resultados[0].estado, 'sincronizado');
+    const u = await sync(s.chamar, fatura({ id_externo: '1500', venda_os: '1500', cliente_telefone: c.telefone, valor: '120.00' }));
+    assert.equal(u.json.estado, 'sincronizado');
   } finally { s.fechar(); }
 });

@@ -260,6 +260,28 @@ async function todasPagas(usuarioId, clienteId) {
   }
 }
 
+/**
+ * Grava tolerando COLUNAS QUE O BANCO DESTE USUÁRIO AINDA NÃO TEM (migrations antigas não rodadas, ex.: importado_em da
+ * migration-29): se o banco reclamar de uma coluna do que estamos gravando, ela sai do envio e tenta de novo (até 6 vezes).
+ * Os dados essenciais (nome, telefone, status...) nunca são tirados: só a coluna que o banco disse não conhecer.
+ */
+async function tolerarColunas(obj, executar) {
+  const dados = { ...obj };
+  let r;
+  for (let i = 0; i < 6; i++) {
+    r = await executar(dados);
+    const msg = String(r?.error?.message ?? '');
+    const col = /'([a-z_0-9]+)' column of/.exec(msg)?.[1] ?? /column "([a-z_0-9]+)" of relation/.exec(msg)?.[1] ?? null;
+    if (r?.error && (r.error.code === 'PGRST204' || r.error.code === '42703') && col && col in dados) {
+      logLimitado(`ennychat-coluna-${col}`, 'warn', `[ennychat] coluna ausente no banco (rode a migration correspondente): ${col}`);
+      delete dados[col];
+      continue;
+    }
+    return r;
+  }
+  return r;
+}
+
 const semM33 = (obj) => {
   const { ennychat_operadora: _o, ...resto } = obj;
   return resto;
@@ -308,7 +330,7 @@ async function sincronizarFatura(usuarioId, fatura, aceitos, { m33, preCliente =
   let cliente;
   let criado = false;
   if (plano.acao === 'criar') {
-    const { data, error } = await supabase.from('clientes').insert(plano.linha).select('*').single();
+    const { data, error } = await tolerarColunas(plano.linha, (l) => supabase.from('clientes').insert(l).select('*').single());
     if (error?.code === '23505') {
       // Corrida/duplicata (mesma fatura ou mesmo telefone): relê; se for a mesma fatura, é idempotência.
       const existente = await clientePorFatura(usuarioId, fatura.id_externo);
@@ -316,7 +338,7 @@ async function sincronizarFatura(usuarioId, fatura, aceitos, { m33, preCliente =
       else if (plano.linha.numero_contrato) {
         // O contrato é único por usuário, mas a MESMA OS existe em operadoras diferentes (BG x Mega): cadastra sem o contrato
         // (a OS continua em os_numero). Se ainda assim colidir (telefone repetido), fica pendente e nada é misturado.
-        const r2 = await supabase.from('clientes').insert({ ...plano.linha, numero_contrato: null }).select('*').single();
+        const r2 = await tolerarColunas({ ...plano.linha, numero_contrato: null }, (l) => supabase.from('clientes').insert(l).select('*').single());
         if (r2.error?.code === '23505') return { ...base, estado: 'pendente_revisao', motivo: 'alvo_ambiguo' };
         if (r2.error) throw r2.error;
         cliente = r2.data;
@@ -325,16 +347,16 @@ async function sincronizarFatura(usuarioId, fatura, aceitos, { m33, preCliente =
     } else if (error) throw error;
     else { cliente = data; criado = true; }
   } else {
-    const { error } = await supabase.from('clientes').update(plano.campos).eq('id', plano.cliente.id).eq('usuario_id', usuarioId);
+    const { error } = await tolerarColunas(plano.campos, (c) => supabase.from('clientes').update(c).eq('id', plano.cliente.id).eq('usuario_id', usuarioId));
     if (error) throw error;
     if (Object.keys(plano.camposFatura).length) {
       let camposFatura = plano.camposFatura;
-      let r = await propagarDadosFatura(plano.cliente.id, usuarioId, camposFatura);
+      let r = await tolerarColunas(camposFatura, (c) => propagarDadosFatura(plano.cliente.id, usuarioId, c));
       if (r.error?.code === '23505' && 'numero_contrato' in camposFatura) {
         // Outro cliente do usuário já tem esse contrato (índice único): grava o resto sem o contrato, em vez de dar 500.
         const { numero_contrato: _omitido, ...semContrato } = camposFatura;
         camposFatura = semContrato;
-        r = Object.keys(camposFatura).length ? await propagarDadosFatura(plano.cliente.id, usuarioId, camposFatura) : { error: null };
+        r = Object.keys(camposFatura).length ? await tolerarColunas(camposFatura, (c) => propagarDadosFatura(plano.cliente.id, usuarioId, c)) : { error: null };
       }
       if (r.error) throw r.error;
       plano.camposFatura = camposFatura;

@@ -4,7 +4,7 @@
 let contador = 0;
 const novoId = () => `00000000-0000-4000-8000-${String(++contador).padStart(12, '0')}`;
 
-export function criarSupabaseFalso({ tabelas = {}, restricoes = {}, tabelasAusentes = [] } = {}) {
+export function criarSupabaseFalso({ tabelas = {}, restricoes = {}, tabelasAusentes = [], colunasAusentes = {} } = {}) {
   const dados = Object.fromEntries(Object.entries(tabelas).map(([k, v]) => [k, v.map((l) => ({ ...l }))]));
   const tab = (nome) => (dados[nome] ??= []);
 
@@ -57,6 +57,10 @@ export function criarSupabaseFalso({ tabelas = {}, restricoes = {}, tabelasAusen
     function executar() {
       if (tabelasAusentes.includes(nomeTabela)) return { data: null, error: { code: '42P01', message: 'relation does not exist' } };
       const T = tab(nomeTabela);
+      if (['insert', 'update', 'upsert'].includes(op)) {
+        const faltando = (colunasAusentes[nomeTabela] ?? []).find((c) => (Array.isArray(payload) ? payload : [payload]).some((p) => p && c in p));
+        if (faltando) return { data: null, error: { code: 'PGRST204', message: `Could not find the '${faltando}' column of '${nomeTabela}' in the schema cache` } };
+      }
       const casa = (l) => filtros.every((f) => f(l));
       if (op === 'insert') {
         const criados = [];

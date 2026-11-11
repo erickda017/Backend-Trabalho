@@ -29,7 +29,7 @@ async function painel() {
   return {
     conf,
     resposta: {
-      disponibilidade: { configurado: brevo.configurado, faltando: brevo.faltando, nome_empresa_definido: Boolean(conf.nomeEmpresa), webhook_configurado: Boolean(process.env.BREVO_WEBHOOK_TOKEN?.trim()) },
+      disponibilidade: { configurado: brevo.configurado, desativado: brevo.desativado, faltando: brevo.faltando, nome_empresa_definido: Boolean(conf.nomeEmpresa), webhook_configurado: Boolean(process.env.BREVO_WEBHOOK_TOKEN?.trim()) },
       nome_empresa: conf.nomeEmpresa,
       limite_por_lote: LIMITE_POR_LOTE,
       // saldo local da conta Brevo (compartilhada): pode estar defasado se outros canais também enviam
@@ -127,7 +127,7 @@ router.get('/faturas', async (req, res) => {
 router.post('/lotes', limiteSensivel, async (req, res) => {
   try {
     const brevo = configuracaoBrevo();
-    if (!brevo.configurado) return res.status(503).json({ error: 'O envio de e-mail ainda não está disponível (configuração da Brevo pendente).', faltando: brevo.faltando });
+    if (!brevo.configurado) return res.status(503).json({ error: brevo.desativado ? 'O envio de e-mail está desativado.' : 'O envio de e-mail ainda não está disponível (configuração da Brevo pendente).', faltando: brevo.faltando });
     const modo = req.body?.modo === 'ids' ? 'ids' : req.body?.modo === 'todos' ? 'todos' : null;
     if (!modo) return res.status(400).json({ error: 'Informe modo: "ids" ou "todos".' });
     const ids = Array.isArray(req.body.ids) ? req.body.ids.filter((x) => typeof x === 'string').slice(0, 2000) : [];

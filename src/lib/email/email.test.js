@@ -102,7 +102,9 @@ test('brevo: reconciliação depois de resultado incerto e configuração', asyn
   assert.equal(await procurarEnvioRecente(q, resp(500, {})), null); // não deu para consultar: segue incerto
   assert.equal(configuracaoBrevo({}).configurado, false);
   assert.deepEqual(configuracaoBrevo({ BREVO_API_KEY: 'k' }).faltando, ['BREVO_FROM_EMAIL', 'BREVO_FROM_NAME']);
-  assert.equal(configuracaoBrevo({ BREVO_API_KEY: 'k', BREVO_FROM_EMAIL: 'a@b.c', BREVO_FROM_NAME: 'N' }).configurado, true);
+  assert.equal(configuracaoBrevo({ BREVO_API_KEY: 'k', BREVO_FROM_EMAIL: 'a@b.c', BREVO_FROM_NAME: 'N', EMAIL_ENVIO_ATIVO: 'true' }).configurado, true);
+  // interruptor: sem EMAIL_ENVIO_ATIVO=true o envio fica desativado mesmo com tudo configurado
+  assert.equal(configuracaoBrevo({ BREVO_API_KEY: 'k', BREVO_FROM_EMAIL: 'a@b.c', BREVO_FROM_NAME: 'N' }).configurado, false);
 });
 
 test('eventos: entrega, devolução, duplicata e evento antigo não rebaixam', () => {

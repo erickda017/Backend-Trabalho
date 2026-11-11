@@ -22,7 +22,7 @@ const { default: rotaEmail } = await import('../routes/disparoEmail.routes.js');
 const { default: rotaWebhook } = await import('../routes/webhookBrevo.routes.js');
 
 const fetchLocal = globalThis.fetch; // as chamadas HTTP locais dos testes usam o fetch real; o da Brevo é trocado por um falso
-const BREVO = { BREVO_API_KEY: 'k', BREVO_FROM_EMAIL: 'envio@umbra.sbs', BREVO_FROM_NAME: 'Faturas' };
+const BREVO = { EMAIL_ENVIO_ATIVO: 'true', BREVO_API_KEY: 'k', BREVO_FROM_EMAIL: 'envio@umbra.sbs', BREVO_FROM_NAME: 'Faturas' };
 const setBrevo = (on) => { for (const [k, v] of Object.entries(BREVO)) on ? (process.env[k] = v) : delete process.env[k]; };
 
 // ---------- cenário ----------

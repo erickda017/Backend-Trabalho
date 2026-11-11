@@ -4,8 +4,12 @@ const BASE = 'https://api.brevo.com/v3';
 
 export function configuracaoBrevo(env = process.env) {
   const faltando = ['BREVO_API_KEY', 'BREVO_FROM_EMAIL', 'BREVO_FROM_NAME'].filter((k) => !env[k]?.trim());
+  // Interruptor geral: o envio de e-mail só funciona com EMAIL_ENVIO_ATIVO=true (desligado por padrão).
+  // Desligado: não cria lote, não envia teste e o worker cancela qualquer item; o resto do sistema segue normal.
+  const desativado = env.EMAIL_ENVIO_ATIVO?.trim().toLowerCase() !== 'true';
   return {
-    configurado: faltando.length === 0,
+    configurado: faltando.length === 0 && !desativado,
+    desativado,
     faltando,
     apiKey: env.BREVO_API_KEY?.trim() || '',
     fromEmail: env.BREVO_FROM_EMAIL?.trim() || '',

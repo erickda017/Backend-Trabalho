@@ -143,9 +143,13 @@ router.get('/resumo', async (req, res) => {
   try {
     const dias = Math.min(Math.max(Number(req.query.dias) || 30, 1), 365);
     const desde = new Date(Date.now() - dias * 86_400_000).toISOString();
-    const { data, error } = await supabase.from('email_envios')
-      .select('cliente_id, email, status, aceito_em, aberturas, primeira_abertura_em, cliques, clique_em, atualizado_em')
+    const consulta = (colunas) => supabase.from('email_envios').select(colunas)
       .eq('usuario_id', req.user.id).not('aceito_em', 'is', null).gte('aceito_em', desde).order('aceito_em', { ascending: false }).limit(5000);
+    let { data, error } = await consulta('cliente_id, email, status, aceito_em, aberturas, primeira_abertura_em, cliques, clique_em, atualizado_em');
+    if (error?.code === '42703' || error?.code === 'PGRST204') {
+      // migration-32 (aberturas/cliques) ainda não rodou: mostra o que existe, sem engajamento
+      ({ data, error } = await consulta('cliente_id, email, status, aceito_em, atualizado_em'));
+    }
     if (error) throw error;
     const l = data || [];
     const entregues = l.filter((e) => e.status === 'entregue' || e.aberturas > 0).length;

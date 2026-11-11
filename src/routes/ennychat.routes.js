@@ -13,6 +13,7 @@ import { escolherCliente, planejarSync } from '../lib/ennychat/cliente.js';
 import { avaliarVinculo, ehPdf } from '../lib/ennychat/vinculo.js';
 import { lerBoletoPdf } from '../services/ennychatPdf.js';
 import { persistirExtracaoPix } from '../lib/pixPersistencia.js';
+import { buscarTodos } from '../lib/buscarTodos.js';
 
 // Integração EnnyChat (recebimento). Contrato: ENNYCHAT_CONTRATO.md (raiz do projeto).
 // Tudo escopado por req.user.id; `responsavel` do EnnyChat nunca é usado.
@@ -343,7 +344,7 @@ router.post('/faturas/:idExterno/anexo', limiteImportacaoArquivo, uploadPdf, asy
     const pdfPath = `${alvo.id}/${Date.now()}-ennychat.pdf`;
     const { error: upErr } = await armazenamento.from(BUCKET).upload(pdfPath, bytes, { contentType: 'application/pdf', upsert: false });
     if (upErr) throw upErr;
-    const r = await propagarDadosFatura(alvo.id, usuarioId, { pdf_path: pdfPath, pdf_atualizado_em: new Date().toISOString(), pix_code: lido.pix });
+    const r = await propagarDadosFatura(alvo.id, usuarioId, { pdf_path: pdfPath, pdf_atualizado_em: new Date().toISOString(), pix_code: lido.pix, ...(lido.linhaDigitavel ? { linha_digitavel: lido.linhaDigitavel } : {}) });
     if (r.error) throw r.error;
     await gravar({ estado: 'vinculado', motivo: null, verificacoes: aval.verificacoes, pdf_path: pdfPath, cliente_id: alvo.id });
     await registrarNaAbaPix({ usuarioId, cliente: alvo, lido });
@@ -395,6 +396,65 @@ router.get('/faturas/:idExterno/estado', async (req, res) => {
     });
   } catch (err) {
     erro500(res, err, 'estado');
+  }
+});
+
+// ---------- GET /faturas/:idExterno/pix ----------
+// Para o botão "Copiar Pix" da extensão. Só devolve com o boleto JÁ VINCULADO (OS, nome e vencimento conferidos) e status
+// aceito: se o PDF for de outra pessoa, nada sai. Somente leitura.
+router.get('/faturas/:idExterno/pix', async (req, res) => {
+  try {
+    const { idExterno } = req.params;
+    if (!idExternoValido(idExterno)) return res.status(400).json({ error: 'Fatura inválida.' });
+    res.set('Cache-Control', 'no-store');
+    const cliente = await clientePorFatura(req.user.id, idExterno);
+    if (!cliente) return res.json({ estado: 'indisponivel', motivo: 'sem_cadastro' });
+    const { status_aceitos: aceitos } = await lerConfig();
+    if (!avaliarStatus(cliente.ennychat_status, aceitos).permitido) return res.json({ estado: 'indisponivel', motivo: 'status_fora_da_lista' });
+    const anexo = await ultimoAnexo(req.user.id, idExterno);
+    if (anexo?.estado !== 'vinculado' || !cliente.pdf_path || !cliente.pix_code) return res.json({ estado: 'indisponivel', motivo: 'sem_vinculo' });
+    res.json({ estado: 'ok', pix: cliente.pix_code, linha_digitavel: cliente.linha_digitavel ?? null });
+  } catch (err) {
+    erro500(res, err, 'pix');
+  }
+});
+
+// ---------- GET /pendencias ----------
+// Faturas do operador (status aceito) que ainda não têm boleto vinculado, com o motivo. Alimenta a fila de pendências da extensão.
+const MOTIVO_SEM_ANEXO = (c) => (c.valor === null || c.valor === undefined ? 'aguardando_valor' : 'aguardando_pdf');
+router.get('/pendencias', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    const { status_aceitos: aceitos } = await lerConfig();
+    const [cli, anx] = await Promise.all([
+      buscarTodos(() => supabase.from('clientes').select('id, nome, os_numero, valor, pdf_path, ennychat_fatura_id, ennychat_status, ennychat_status_em')
+        .eq('usuario_id', req.user.id).eq('campanha', 'cobranca').not('ennychat_fatura_id', 'is', null).order('id')),
+      buscarTodos(() => supabase.from('ennychat_anexos').select('fatura_externa_id, estado, motivo, atualizado_em').eq('usuario_id', req.user.id).order('id')),
+    ]);
+    if (cli.error) throw cli.error;
+    if (anx.error) throw anx.error;
+    const ultimo = new Map();
+    for (const a of anx.data || []) {
+      const atual = ultimo.get(a.fatura_externa_id);
+      if (!atual || a.atualizado_em > atual.atualizado_em) ultimo.set(a.fatura_externa_id, a);
+    }
+    const itens = (cli.data || [])
+      .filter((c) => avaliarStatus(c.ennychat_status, aceitos).permitido)
+      .map((c) => ({ c, a: ultimo.get(c.ennychat_fatura_id) }))
+      .filter(({ c, a }) => !(a?.estado === 'vinculado' && c.pdf_path))
+      .map(({ c, a }) => ({
+        id_externo: c.ennychat_fatura_id,
+        nome: c.nome,
+        os: c.os_numero,
+        estado: a?.estado ?? 'aguardando',
+        motivo: a?.motivo ?? (a?.estado === 'processando' ? null : MOTIVO_SEM_ANEXO(c)),
+        em: a?.atualizado_em ?? c.ennychat_status_em ?? null,
+      }))
+      .sort((x, y) => String(y.em ?? '').localeCompare(String(x.em ?? '')))
+      .slice(0, 100);
+    res.json({ total: itens.length, itens });
+  } catch (err) {
+    erro500(res, err, 'pendencias');
   }
 });
 

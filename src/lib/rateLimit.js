@@ -36,6 +36,8 @@ export const limiteGeral = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: chave,
+  // O webhook da Brevo vem de IPs da Brevo (rajadas legítimas de eventos): não pode ser barrado aqui (tem segredo próprio).
+  skip: (req) => req.originalUrl.startsWith('/api/webhooks/brevo'),
   message: { error: 'Muitas requisições em pouco tempo. Aguarde um pouco e tente de novo.' },
 });
 

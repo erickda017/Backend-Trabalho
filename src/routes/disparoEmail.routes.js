@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { buscarTodos } from '../lib/buscarTodos.js';
 import { supabase } from '../lib/supabase.js';
 import { descreverErro } from '../lib/redigir.js';
 import { logLimitado } from '../lib/log.js';
@@ -174,8 +175,9 @@ router.get('/resumo', async (req, res) => {
 
 const CONTAGENS = ['na_fila', 'processando', 'aceito', 'entregue', 'devolvido', 'falhou', 'cancelado'];
 
-async function resumoLote(lote) {
-  const { data } = await supabase.from('email_envios').select('status, aceito_em, tentativas').eq('lote_id', lote.id);
+// `linhas` = envios do lote já carregados (lista de lotes faz UMA consulta para todos); sem ele, busca os deste lote.
+async function resumoLote(lote, linhas) {
+  const data = linhas ?? (await supabase.from('email_envios').select('status, aceito_em, tentativas').eq('lote_id', lote.id)).data;
   const contagens = Object.fromEntries(CONTAGENS.map((s) => [s, 0]));
   let aceitosParaEnvio = 0;
   let tentativasTecnicas = 0;
@@ -192,7 +194,12 @@ router.get('/lotes', async (req, res) => {
   try {
     const { data, error } = await supabase.from('email_lotes').select('*').eq('usuario_id', req.user.id).order('criado_em', { ascending: false }).limit(10);
     if (error) throw error;
-    res.json({ itens: await Promise.all((data || []).map(resumoLote)) });
+    const ids = (data || []).map((l) => l.id);
+    const envios = ids.length ? await buscarTodos(() => supabase.from('email_envios').select('lote_id, status, aceito_em, tentativas').in('lote_id', ids).order('id')) : { data: [] };
+    if (envios.error) throw envios.error;
+    const porLote = new Map(ids.map((id) => [id, []]));
+    for (const e of envios.data || []) porLote.get(e.lote_id)?.push(e);
+    res.json({ itens: await Promise.all((data || []).map((l) => resumoLote(l, porLote.get(l.id)))) });
   } catch (err) {
     erro500(res, err, 'lotes');
   }

@@ -28,7 +28,8 @@ export async function carregarLinhas(usuarioId, cfg, agora = new Date()) {
   ]);
   for (const r of [cli, anx, env]) if (r.error) throw r.error;
 
-  const pdfPorFatura = new Map((anx.data || []).map((a) => [a.fatura_externa_id, a.pdf_path]));
+  // Uma fatura pode ter vários anexos vinculados ao longo do tempo: vale qualquer par fatura|pdf igual ao PDF atual do cliente.
+  const pdfsValidados = new Set((anx.data || []).map((a) => `${a.fatura_externa_id}|${a.pdf_path}`));
   // Identidade do envio = a FATURA do EnnyChat (sobrevive a apagar/reimportar o cliente); sem ela, o cliente.
   const porChave = new Map();
   const chaveEnvio = (fatura, cliente) => (fatura ? `f:${fatura}` : `c:${cliente}`);
@@ -47,7 +48,7 @@ export async function carregarLinhas(usuarioId, cfg, agora = new Date()) {
     const a = porChave.get(chaveEnvio(c.ennychat_fatura_id, c.id)) ?? { aceitos: 0, incertos: 0, tentativas: 0, ativo: false, ultimo: null };
     const { elegivel, motivos } = avaliarElegibilidade({
       cliente: c,
-      pdfValidado: Boolean(c.pdf_path) && pdfPorFatura.get(c.ennychat_fatura_id) === c.pdf_path,
+      pdfValidado: Boolean(c.pdf_path) && pdfsValidados.has(`${c.ennychat_fatura_id}|${c.pdf_path}`),
       aceitos: a.aceitos,
       incertos: a.incertos,
       ativo: a.ativo,

@@ -177,8 +177,16 @@ router.post('/faturas/sync', limiteImportacaoArquivo, async (req, res) => {
       const { error } = await supabase.from('clientes').update(plano.campos).eq('id', plano.cliente.id).eq('usuario_id', usuarioId);
       if (error) throw error;
       if (Object.keys(plano.camposFatura).length) {
-        const r = await propagarDadosFatura(plano.cliente.id, usuarioId, plano.camposFatura);
+        let camposFatura = plano.camposFatura;
+        let r = await propagarDadosFatura(plano.cliente.id, usuarioId, camposFatura);
+        if (r.error?.code === '23505' && 'numero_contrato' in camposFatura) {
+          // Outro cliente do usuário já tem esse contrato (índice único): grava o resto sem o contrato, em vez de dar 500.
+          const { numero_contrato: _omitido, ...semContrato } = camposFatura;
+          camposFatura = semContrato;
+          r = Object.keys(camposFatura).length ? await propagarDadosFatura(plano.cliente.id, usuarioId, camposFatura) : { error: null };
+        }
         if (r.error) throw r.error;
+        plano.camposFatura = camposFatura;
       }
       cliente = { ...plano.cliente, ...plano.campos, ...plano.camposFatura };
     }
@@ -190,7 +198,8 @@ router.post('/faturas/sync', limiteImportacaoArquivo, async (req, res) => {
       cliente_id: cliente.id,
       criado,
       conflitos: plano.acao === 'atualizar' ? plano.conflitos : [],
-      pdf: estadoPdf(anexo),
+      // 'vinculado' sem PDF no cliente (limpeza dos 40 dias apagou o arquivo): a extensão precisa reenviar.
+      pdf: anexo?.estado === 'vinculado' && !cliente.pdf_path ? 'aguardando' : estadoPdf(anexo),
       ultimo_anexo_id: anexo?.anexo_id ?? null, // a extensão só baixa/envia o PDF se este anexo ainda não foi vinculado
       pdf_motivo: anexo?.motivo ?? null,
       pdf_atualizado_em: anexo?.atualizado_em ?? null,
@@ -246,6 +255,8 @@ router.post('/faturas/:idExterno/anexo', limiteImportacaoArquivo, uploadPdf, asy
       // O arquivo ORIGINAL que o operador subiu (campos.origem = 'upload') tem prioridade: sempre reavalia uma pendência.
       const reprocessar =
         existente.cliente_id !== cliente0.id ||
+        (existente.estado === 'vinculado' && !cliente0.pdf_path) || // arquivo removido pela limpeza: vincula de novo
+
         (existente.estado === 'pendente_revisao' && (idade > REPROCESSAR_PENDENTE_APOS_MS || campos.origem === 'upload')) ||
         (existente.estado === 'processando' && idade > REPROCESSAR_PROCESSANDO_APOS_MS);
       if (!reprocessar) return res.json(resposta(cliente0, existente.estado, existente.motivo, existente.verificacoes, { repetido: true }));

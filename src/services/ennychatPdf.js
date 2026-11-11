@@ -78,7 +78,8 @@ async function lerPorWorkerRecortes(bytes) {
   for (let p = 1; p <= 2; p++) {
     let lido = null;
     for (let t = 0; t < 2 && lido === null; t++) {
-      const jpeg = await recorteCabecalhoJpeg(bytes, p);
+      // só a renderização usa a fila global (CPU); a chamada de rede ao Worker fica FORA dela e não trava as outras leituras
+      const jpeg = await executarSequencial(() => recorteCabecalhoJpeg(bytes, p));
       if (!jpeg) break;
       lido = await chamarWorker(jpeg).catch(() => null);
       if (lido === null && t === 0) await new Promise((r) => setTimeout(r, 2000));
@@ -118,7 +119,7 @@ export async function lerBoletoPdf(bytes) {
     // Worker só quando o texto não deu os 3 campos (PDF imagem ou layout fora do padrão).
     if (!campos.codigo || !campos.nome || !campos.vencimento) {
       try {
-        const w = await executarSequencial(() => lerPorWorkerRecortes(bytes));
+        const w = await lerPorWorkerRecortes(bytes);
         diag.worker = w ? `ok:${['codigo', 'nome', 'vencimento'].filter((k) => w[k]).join('+') || 'nada'}` : 'sem_imagem';
         if (w) {
           campos = {
@@ -136,10 +137,13 @@ export async function lerBoletoPdf(bytes) {
       }
     }
     let pix = null;
-    try {
-      pix = await lerPix(bytes);
-    } catch (err) {
-      logLimitado('ennychat-pix', 'warn', '[ennychat] leitura do QR Pix falhou:', err.message);
+    // Pix já válido na camada de texto: dispensa a leitura do QR (renderização pesada de página inteira).
+    if (!isValidPixPayload(campos.pixCopiaColaTexto)) {
+      try {
+        pix = await lerPix(bytes);
+      } catch (err) {
+        logLimitado('ennychat-pix', 'warn', '[ennychat] leitura do QR Pix falhou:', err.message);
+      }
     }
     diag.pix_qr = isValidPixPayload(pix);
     if (!isValidPixPayload(pix)) pix = isValidPixPayload(campos.pixCopiaColaTexto) ? campos.pixCopiaColaTexto : null;

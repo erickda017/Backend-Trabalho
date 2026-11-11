@@ -30,7 +30,8 @@ const uploadPdf = comTratamentoDeErroUpload(upload.single('arquivo'), { limiteMb
 
 const erro500 = (res, err, ctx) => {
   logLimitado(`ennychat-${ctx}`, 'error', `[ennychat] ${ctx}:`, descreverErro(err));
-  return res.status(500).json({ error: 'Não foi possível processar agora. Tente novamente.' });
+  // `diag` = só o código e a mensagem curta do banco (nunca o `detail`, que pode ecoar dados do cliente): ajuda a achar a causa.
+  return res.status(500).json({ error: 'Não foi possível processar agora. Tente novamente.', diag: { codigo: err?.code ?? null, mensagem: String(err?.message ?? '').slice(0, 200) } });
 };
 
 // ---------- token da extensão ----------

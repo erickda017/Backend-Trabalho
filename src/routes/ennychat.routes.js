@@ -253,7 +253,10 @@ router.post('/faturas/:idExterno/anexo', limiteImportacaoArquivo, uploadPdf, asy
       return res.json(resposta(cliente0, 'pendente_revisao', 'alvo_ambiguo', null));
     }
     const aval = avaliarVinculo({ alvo, extraido: lido, pixValido: Boolean(lido.pix) });
-    aval.verificacoes = { ...aval.verificacoes, diag: lido.diag };
+    // Só a FORMA do código lido (dígitos mascarados) + 3 últimos dígitos: ajuda a descobrir como o Código do boleto
+    // se relaciona com a OS do EnnyChat sem gravar o número inteiro.
+    const formaCodigo = lido.codigo ? { forma: String(lido.codigo).replace(/\d/g, 'N'), fim3: String(lido.codigo).replace(/\D/g, '').slice(-3) } : null;
+    aval.verificacoes = { ...aval.verificacoes, diag: { ...lido.diag, codigo: formaCodigo } };
 
     if (aval.estado !== 'vinculado') {
       await gravar({ estado: 'pendente_revisao', motivo: aval.motivo, verificacoes: aval.verificacoes });

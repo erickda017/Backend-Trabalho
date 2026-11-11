@@ -46,7 +46,8 @@ export async function enviarTransacional({ cfg, para, assunto, html, anexoNome, 
   }
   if (r.status === 429) return { ok: false, tipo: 'transitorio', status: r.status, erro: 'http_429' };
   if (r.status >= 500) return { ok: false, tipo: 'incerto', status: r.status, erro: `http_${r.status}` };
-  return { ok: false, tipo: 'definitivo', status: r.status, erro: `http_${r.status}` };
+  // `mensagem` = texto de diagnóstico da Brevo (ex.: IP não autorizado); só para exibir ao operador, nunca grava dado de cliente.
+  return { ok: false, tipo: 'definitivo', status: r.status, erro: `http_${r.status}`, mensagem: typeof json?.message === 'string' ? json.message.slice(0, 300) : null };
 }
 
 // Reconciliação depois de resultado incerto: procura e-mails transacionais para o destinatário com o mesmo assunto

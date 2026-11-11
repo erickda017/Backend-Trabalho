@@ -95,7 +95,7 @@ router.post('/teste', limiteSensivel, async (req, res) => {
     const mes = mesReferencia(iso);
     const html = renderizarEmail({ empresa, primeiro_nome: primeiroNome(c.nome), mes_referencia: mes, vencimento: formatarDataIso(iso), valor: formatarValor(c.valor), mensagem: mensagemFatura(iso, hojeBrt()) });
     const r = await enviarTransacional({ cfg: brevo, para, assunto: `[TESTE] ${assuntoFatura(mes)}`, html, anexoNome: 'fatura.pdf', anexoBase64: bytes.toString('base64') });
-    if (!r.ok) return res.status(502).json({ error: 'A Brevo não aceitou o envio de teste.', detalhe: r.erro });
+    if (!r.ok) return res.status(502).json({ error: 'A Brevo não aceitou o envio de teste.', detalhe: r.erro, mensagem: r.mensagem ?? null });
     res.json({ ok: true, para, message_id: r.messageId ?? null });
   } catch (err) {
     erro500(res, err, 'teste');

@@ -197,6 +197,141 @@ async function extrairPixDaPagina(pagina, indicePagina, criarCanvas, alvos = ALV
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// [2026-11] MODO COMPLETO (integração EnnyChat): porta fiel das estratégias do extrator do navegador
+// (frontend/src/lib/pixExtractor.ts) que o modo padrão do servidor não tinha:
+//   1) CANTO "NATIVO": PDFs escaneados/de impressora virtual guardam a página como UMA imagem de ~144dpi, onde o QR
+//      tem ~1px por módulo. Pedir escala alta ao pdfjs reamostra e borra; render em escala 2 (1px do canvas = 1px da
+//      imagem) + ampliação 3x com suavização do próprio canvas lê. Roda ANTES, em todas as páginas.
+//   2) VARREDURA EM BLOCOS (3x4, 40% de sobreposição): jsQR decodifica UM QR por chamada; com QR de propaganda
+//      colado no Pix ele pode "travar" no errado. Isolar em blocos resolve.
+// Nenhuma redução de qualidade: tudo renderiza a partir do PDF original.
+// ---------------------------------------------------------------------------
+const QR_TILE_COLS = 3;
+const QR_TILE_ROWS = 4;
+const QR_TILE_OVERLAP = 0.4;
+const QR_TILE_MIN_DIMENSAO = 300;
+const ESCALA_NATIVA = 2;
+const FATOR_AMPLIACAO_NATIVO = 3;
+const TIMEOUT_POR_PAGINA_MS = 20_000;
+
+function lerQrDoRetangulo(ctx, x0, y0, w, h) {
+  if (w < 20 || h < 20) return null;
+  try {
+    const imageData = ctx.getImageData(x0, y0, w, h);
+    const resultado = jsQR(imageData.data, imageData.width, imageData.height);
+    const payload = resultado?.data?.trim();
+    return isValidPixPayload(payload) ? payload : null;
+  } catch (err) {
+    logLimitado('jsqr', 'warn', '[extratorServidorPix] jsQR falhou:', err.message);
+    return null;
+  }
+}
+
+function ordemDosBlocos(linhas, colunas) {
+  const ordemLinhas = [linhas - 1, ...Array.from({ length: linhas - 1 }, (_, i) => i)]; // última linha primeiro
+  const ordem = [];
+  for (const linha of ordemLinhas) for (let coluna = 0; coluna < colunas; coluna++) ordem.push([linha, coluna]);
+  return ordem;
+}
+
+function escanearBlocos(ctx, width, height) {
+  if (width < QR_TILE_MIN_DIMENSAO || height < QR_TILE_MIN_DIMENSAO) return null;
+  const tileW = width / QR_TILE_COLS;
+  const tileH = height / QR_TILE_ROWS;
+  for (const [linha, coluna] of ordemDosBlocos(QR_TILE_ROWS, QR_TILE_COLS)) {
+    const x0 = Math.max(0, Math.floor(coluna * tileW - tileW * QR_TILE_OVERLAP));
+    const y0 = Math.max(0, Math.floor(linha * tileH - tileH * QR_TILE_OVERLAP));
+    const x1 = Math.min(width, Math.ceil((coluna + 1) * tileW + tileW * QR_TILE_OVERLAP));
+    const y1 = Math.min(height, Math.ceil((linha + 1) * tileH + tileH * QR_TILE_OVERLAP));
+    const pix = lerQrDoRetangulo(ctx, x0, y0, x1 - x0, y1 - y0);
+    if (pix) return pix;
+  }
+  return null;
+}
+
+async function tentarRegiaoComBlocos(pagina, regiao, alvos, criarCanvas) {
+  for (const px of alvos) {
+    const canvas = await renderizarRegiao(pagina, regiao, px, criarCanvas);
+    const ctx = canvas.getContext('2d');
+    const pix = lerQrDoRetangulo(ctx, 0, 0, canvas.width, canvas.height) ?? escanearBlocos(ctx, canvas.width, canvas.height);
+    liberarCanvas(canvas);
+    if (pix) return pix;
+  }
+  return null;
+}
+
+async function tentarCantoNativo(pagina, regiao, comBlocos, criarCanvas) {
+  const viewport = pagina.getViewport({ scale: ESCALA_NATIVA });
+  const x0 = Math.floor(viewport.width * regiao.x0);
+  const y0 = Math.floor(viewport.height * regiao.y0);
+  const w = Math.max(1, Math.ceil(viewport.width * regiao.x1) - x0);
+  const h = Math.max(1, Math.ceil(viewport.height * regiao.y1) - y0);
+
+  const origem = criarCanvas(w, h);
+  const ctxOrigem = origem.getContext('2d');
+  ctxOrigem.fillStyle = '#ffffff';
+  ctxOrigem.fillRect(0, 0, w, h);
+  ctxOrigem.translate(-x0, -y0);
+  await pagina.render({ canvasContext: ctxOrigem, viewport }).promise;
+
+  const ampliado = criarCanvas(w * FATOR_AMPLIACAO_NATIVO, h * FATOR_AMPLIACAO_NATIVO);
+  const ctxAmp = ampliado.getContext('2d');
+  ctxAmp.imageSmoothingEnabled = true;
+  ctxAmp.imageSmoothingQuality = 'high';
+  ctxAmp.drawImage(origem, 0, 0, w, h, 0, 0, ampliado.width, ampliado.height);
+  liberarCanvas(origem);
+
+  let pix = lerQrDoRetangulo(ctxAmp, 0, 0, ampliado.width, ampliado.height);
+  if (!pix && comBlocos) pix = escanearBlocos(ctxAmp, ampliado.width, ampliado.height);
+  liberarCanvas(ampliado);
+  return pix;
+}
+
+const comTimeout = (promise, ms) => Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(null), ms))]);
+
+async function extrairPixCompleto(doc, criarCanvas) {
+  const totalPaginas = Math.min(doc.numPages, MAX_PAGINAS_COMPLETO);
+  // 2 passadas (como o navegador): rápida/nativa em TODAS as páginas, depois a varredura completa.
+  for (const rapido of [true, false]) {
+    for (let indice = 0; indice < totalPaginas; indice++) {
+      let pagina = null;
+      try {
+        pagina = await doc.getPage(indice + 1);
+        const tarefa = rapido
+          ? (async () => {
+              for (const [regiao, origem] of [[REGIAO_CANTO_JUSTA, 'canto'], [REGIAO_CANTO_AMPLA, 'canto-ampliado']]) {
+                const pix = await tentarCantoNativo(pagina, regiao, origem === 'canto', criarCanvas);
+                if (pix) return { pixCopiaCola: pix, pagina: indice + 1, origem: `${origem}-nativo` };
+              }
+              return null;
+            })()
+          : (async () => {
+              for (const [regiao, alvos, origem] of [
+                [REGIAO_CANTO_JUSTA, ALVOS_COMPLETO.canto, 'canto'],
+                [REGIAO_CANTO_AMPLA, ALVOS_COMPLETO.ampla, 'canto-ampliado'],
+                [REGIAO_PAGINA_INTEIRA, ALVOS_COMPLETO.inteira, 'pagina-inteira'],
+              ]) {
+                const pix = await tentarRegiaoComBlocos(pagina, regiao, alvos, criarCanvas);
+                if (pix) return { pixCopiaCola: pix, pagina: indice + 1, origem };
+              }
+              return null;
+            })();
+        const r = await comTimeout(tarefa, TIMEOUT_POR_PAGINA_MS);
+        if (r) return r;
+      } catch (err) {
+        if (!rapido) throw err;
+        logLimitado('qr-nativo', 'warn', '[extratorServidorPix] leitura nativa falhou, segue pro método completo:', err.message);
+      } finally {
+        if (pagina && typeof pagina.cleanup === 'function') {
+          try { pagina.cleanup(); } catch (_) { /* noop */ }
+        }
+      }
+    }
+  }
+  return null;
+}
+
 // Ponto de entrada: extrai o Pix de 1 PDF já salvo em disco (`caminhoArquivo`,
 // escrito pelo multer diskStorage -- ver routes/pix.routes.js). SEMPRE
 // enfileirado (ver executarSequencial) -- só 1 execução real por vez neste
@@ -225,12 +360,14 @@ export async function extrairPixDeArquivoNoServidor(caminhoArquivo, { completo =
         isEvalSupported: false,
       }).promise;
 
-      const totalPaginas = Math.min(doc.numPages, completo ? MAX_PAGINAS_COMPLETO : MAX_PAGINAS_POR_PDF);
+      if (completo) return await extrairPixCompleto(doc, (w, h) => fabricaCanvas.create(w, h).canvas);
+
+      const totalPaginas = Math.min(doc.numPages, MAX_PAGINAS_POR_PDF);
       for (let indice = 0; indice < totalPaginas; indice++) {
         let pagina = null;
         try {
           pagina = await doc.getPage(indice + 1);
-          const resultado = await extrairPixDaPagina(pagina, indice, (w, h) => fabricaCanvas.create(w, h).canvas, completo ? ALVOS_COMPLETO : ALVOS_PADRAO);
+          const resultado = await extrairPixDaPagina(pagina, indice, (w, h) => fabricaCanvas.create(w, h).canvas, ALVOS_PADRAO);
           if (resultado) return resultado;
         } finally {
           if (pagina && typeof pagina.cleanup === 'function') {

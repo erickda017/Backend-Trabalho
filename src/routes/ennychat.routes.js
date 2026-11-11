@@ -9,7 +9,8 @@ import { limiteImportacaoArquivo } from '../lib/rateLimit.js';
 import { descreverErro } from '../lib/redigir.js';
 import { logLimitado } from '../lib/log.js';
 import { avaliarStatus, idExternoValido, pagoOuEncerrado, validarCamposAnexo, validarFatura, validarItensCatalogo } from '../lib/ennychat/payload.js';
-import { escolherCliente, planejarSync } from '../lib/ennychat/cliente.js';
+import { ehFaturaIrma, escolherCliente, planejarSync, STATUS_SISTEMA } from '../lib/ennychat/cliente.js';
+import { isValidPixPayload } from '../lib/pixValidacao.js';
 import { avaliarVinculo, ehPdf } from '../lib/ennychat/vinculo.js';
 import { lerBoletoPdf } from '../services/ennychatPdf.js';
 import { persistirExtracaoPix } from '../lib/pixPersistencia.js';
@@ -109,11 +110,28 @@ const clientePorFatura = async (usuarioId, idExterno) => {
   return data?.length === 1 ? data[0] : null;
 };
 
+// migration-33 (operadora + ennychat_faturas): o código tolera ela ainda não ter rodado (só deixa de usar os recursos novos).
+let m33Cache = { ok: null, em: 0 };
+async function temM33() {
+  if (m33Cache.ok === true) return true;
+  if (m33Cache.ok === false && Date.now() - m33Cache.em < 60_000) return false;
+  const { error } = await supabase.from('ennychat_faturas').select('id').limit(1);
+  m33Cache = { ok: !error, em: Date.now() };
+  return !error;
+}
+
+// Operadoras em que NÃO há boleto em PDF: o Pix é digitado pelo operador no EnnyChat (campo codigo_pix da fatura).
+const OPERADORAS_SEM_PDF = new Set(['desktop']);
+
 // Busca injetada em escolherCliente: sempre dentro da carteira de cobrança do usuário.
-const buscarClientes = (usuarioId) => async (criterio, valor) => {
+// Com operadora conhecida, cliente de OUTRA operadora nunca é candidato (BG x Mega, Desktop x Claro...).
+const buscarClientes = (usuarioId, m33 = false) => async (criterio, valor, operadora = null) => {
   let q = supabase.from('clientes').select('*').eq('usuario_id', usuarioId).limit(3);
   if (criterio === 'ennychat_fatura_id') q = q.eq('ennychat_fatura_id', valor);
-  else q = q.eq('campanha', 'cobranca').in(criterio, Array.isArray(valor) ? valor : [valor]);
+  else {
+    q = q.eq('campanha', 'cobranca').in(criterio, Array.isArray(valor) ? valor : [valor]);
+    if (m33 && operadora) q = q.or(`ennychat_operadora.is.null,ennychat_operadora.eq.${operadora}`);
+  }
   const { data, error } = await q;
   if (error) throw error;
   return data || [];
@@ -158,14 +176,164 @@ async function registrarNaAbaPix({ usuarioId, cliente, lido }) {
 // Fatura JÁ cadastrada que passou a status fora da lista (ou paga/encerrada): grava o novo status (nunca cria nada).
 // Não está na lista de aceitos, então o Disparo / E-mail deixa de considerá-la; um sync posterior com status aceito restaura.
 const STATUS_ENCERRADO = 'pago_ou_encerrado';
-async function registrarStatusConhecido(usuarioId, idExterno, status) {
+// Número inválido / pagamento confirmado / fraude também viram o status do sistema (bloqueia disparo). Só neste cliente (não no grupo
+// de números: "número inválido" vale para ESTE telefone, não para os outros do mesmo cliente).
+async function registrarStatusConhecido(usuarioId, idExterno, status, { mapear = true } = {}) {
   if (typeof status !== 'string' || !status.trim()) return;
   try {
-    await supabase.from('clientes').update({ ennychat_status: status.slice(0, 100), ennychat_status_em: new Date().toISOString() })
-      .eq('usuario_id', usuarioId).eq('ennychat_fatura_id', idExterno);
+    const agora = new Date().toISOString();
+    const espelho = mapear ? STATUS_SISTEMA[status] : null;
+    await supabase.from('clientes').update({
+      ennychat_status: status.slice(0, 100), ennychat_status_em: agora,
+      ...(espelho ? { status_operador: espelho, status_operador_atualizado_em: agora } : {}),
+    }).eq('usuario_id', usuarioId).eq('ennychat_fatura_id', idExterno);
   } catch (err) {
     logLimitado('ennychat-status-conhecido', 'error', '[ennychat] registrar status:', descreverErro(err));
   }
+}
+
+// "DD/MM/AAAA" (formato do site) -> "AAAA-MM-DD" (coluna date), ou null.
+const dmyParaIso = (v) => {
+  const m = typeof v === 'string' ? /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v) : null;
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
+};
+const pagaNoEnnychat = (i) => pagoOuEncerrado({ status_pagamento: i.status_pagamento }) || Boolean(i.data_pagamento);
+
+// Grava TODAS as faturas da ficha em ennychat_faturas (uma linha por fatura; pagamento e Pix inclusos). Nunca derruba o sync.
+async function gravarFaturas(usuarioId, cliente, fatura) {
+  try {
+    const itens = fatura.faturas.some((x) => x.id === fatura.id_externo)
+      ? fatura.faturas
+      : [...fatura.faturas, { id: fatura.id_externo, posicao: fatura.posicao, mes_referencia: null, vencimento: dmyParaIso(fatura.vencimento), valor: fatura.valor, status_pagamento: fatura.status_pagamento, data_pagamento: fatura.data_pagamento, codigo_pix: fatura.codigo_pix }];
+    const agora = new Date().toISOString();
+    const linhas = itens.map((i) => {
+      const pixOk = isValidPixPayload(i.codigo_pix);
+      return {
+        usuario_id: usuarioId, fatura_externa_id: i.id, cliente_id: cliente.id, operadora: fatura.operadora, os_numero: fatura.os_numero,
+        posicao: i.posicao, mes_referencia: i.mes_referencia, vencimento: i.vencimento, valor: i.valor,
+        status_pagamento: i.status_pagamento, data_pagamento: i.data_pagamento, pago: pagaNoEnnychat(i),
+        pix_code: pixOk ? i.codigo_pix : null, pix_origem: pixOk ? 'site' : null, pix_atualizado_em: pixOk ? agora : null, atualizado_em: agora,
+      };
+    });
+    const { error } = await supabase.from('ennychat_faturas').upsert(linhas, { onConflict: 'usuario_id,fatura_externa_id' });
+    if (error) throw error;
+  } catch (err) {
+    logLimitado('ennychat-faturas', 'error', '[ennychat] gravar faturas:', descreverErro(err));
+  }
+}
+
+// Existe outra fatura deste cliente (conhecida) ainda em aberto? Sem tabela/dado => considera paga (comportamento de antes).
+async function todasPagas(usuarioId, clienteId) {
+  try {
+    const { data, error } = await supabase.from('ennychat_faturas').select('id').eq('usuario_id', usuarioId).eq('cliente_id', clienteId).eq('pago', false).limit(1);
+    if (error) throw error;
+    return !(data && data.length);
+  } catch {
+    return true;
+  }
+}
+
+const semM33 = (obj) => {
+  const { ennychat_operadora: _o, ...resto } = obj;
+  return resto;
+};
+
+/**
+ * Núcleo do sync (usado por POST /faturas/sync e por POST /lote). Devolve o corpo da resposta.
+ * `preCliente` = cliente já carregado pela fatura (o lote pré-busca todos de uma vez, poupando consultas).
+ */
+async function sincronizarFatura(usuarioId, fatura, aceitos, { m33, preCliente = null } = {}) {
+  const base = { cliente_id: null, criado: false, conflitos: [], pdf: 'aguardando', pix: false, operadora: fatura.operadora ?? null };
+
+  // Lista de permissão: nada é criado nem gravado fora dela.
+  const st = avaliarStatus(fatura.status_operador, aceitos);
+  if (!st.permitido) {
+    // fatura já cadastrada deixa de ser elegível (no lote, só grava se o status realmente mudou: poupa consultas)
+    if (!preCliente || preCliente.ennychat_status !== fatura.status_operador) await registrarStatusConhecido(usuarioId, fatura.id_externo, fatura.status_operador);
+    return { ...base, estado: 'bloqueado_status', motivo: st.motivo };
+  }
+  if (pagoOuEncerrado(fatura) || fatura.data_pagamento) {
+    const conhecido = m33 ? (preCliente ?? (await clientePorFatura(usuarioId, fatura.id_externo))) : null;
+    if (conhecido) await gravarFaturas(usuarioId, conhecido, fatura); // a fatura fica marcada como paga em ennychat_faturas
+    // O cliente só vira "pagamento confirmado" (bloqueia disparo) se NÃO houver outra fatura dele em aberto.
+    const mapear = conhecido ? await todasPagas(usuarioId, conhecido.id) : true;
+    if (!preCliente || preCliente.ennychat_status !== STATUS_ENCERRADO) await registrarStatusConhecido(usuarioId, fatura.id_externo, STATUS_ENCERRADO, { mapear });
+    return { ...base, estado: 'pendente_revisao', motivo: 'pagamento_ou_encerrado' };
+  }
+
+  const escolha = preCliente
+    ? { tipo: 'unico', por: 'ennychat_fatura_id', cliente: preCliente }
+    : await escolherCliente(fatura, buscarClientes(usuarioId, m33));
+
+  // Fatura 2 do mesmo cliente (mesma OS, mesma operadora, mesmo nome): só registra; o cadastro não muda.
+  if (m33 && ehFaturaIrma({ escolha, fatura })) {
+    await gravarFaturas(usuarioId, escolha.cliente, fatura);
+    return { ...base, estado: 'sincronizado', motivo: null, cliente_id: escolha.cliente.id, irma: true };
+  }
+
+  const plano = planejarSync({ usuarioId, fatura, escolha, agora: new Date().toISOString() });
+  if (plano.acao === 'pendente') return { ...base, estado: 'pendente_revisao', motivo: plano.motivo };
+  if (!m33) {
+    if (plano.linha) plano.linha = semM33(plano.linha);
+    if (plano.campos) plano.campos = semM33(plano.campos);
+  }
+
+  let cliente;
+  let criado = false;
+  if (plano.acao === 'criar') {
+    const { data, error } = await supabase.from('clientes').insert(plano.linha).select('*').single();
+    if (error?.code === '23505') {
+      // Corrida/duplicata (mesma fatura ou mesmo telefone): relê; se for a mesma fatura, é idempotência.
+      const existente = await clientePorFatura(usuarioId, fatura.id_externo);
+      if (!existente) return { ...base, estado: 'pendente_revisao', motivo: 'alvo_ambiguo' };
+      cliente = existente;
+    } else if (error) throw error;
+    else { cliente = data; criado = true; }
+  } else {
+    const { error } = await supabase.from('clientes').update(plano.campos).eq('id', plano.cliente.id).eq('usuario_id', usuarioId);
+    if (error) throw error;
+    if (Object.keys(plano.camposFatura).length) {
+      let camposFatura = plano.camposFatura;
+      let r = await propagarDadosFatura(plano.cliente.id, usuarioId, camposFatura);
+      if (r.error?.code === '23505' && 'numero_contrato' in camposFatura) {
+        // Outro cliente do usuário já tem esse contrato (índice único): grava o resto sem o contrato, em vez de dar 500.
+        const { numero_contrato: _omitido, ...semContrato } = camposFatura;
+        camposFatura = semContrato;
+        r = Object.keys(camposFatura).length ? await propagarDadosFatura(plano.cliente.id, usuarioId, camposFatura) : { error: null };
+      }
+      if (r.error) throw r.error;
+      plano.camposFatura = camposFatura;
+    }
+    cliente = { ...plano.cliente, ...plano.campos, ...plano.camposFatura };
+  }
+
+  // Todas as faturas da ficha (Fatura 1, Fatura 2...), com pagamento e Pix.
+  if (m33) await gravarFaturas(usuarioId, cliente, fatura);
+
+  // Operadora sem PDF (Desktop): o Pix digitado no EnnyChat passa a ser o Pix do cliente (validado: CRC).
+  const pixSite = isValidPixPayload(fatura.codigo_pix);
+  if (pixSite && OPERADORAS_SEM_PDF.has(fatura.operadora) && cliente.pix_code !== fatura.codigo_pix) {
+    const r = await propagarDadosFatura(cliente.id, usuarioId, { pix_code: fatura.codigo_pix });
+    if (r.error) throw r.error;
+    cliente = { ...cliente, pix_code: fatura.codigo_pix };
+  }
+
+  const anexo = await ultimoAnexo(usuarioId, fatura.id_externo);
+  return {
+    estado: 'sincronizado',
+    motivo: null,
+    cliente_id: cliente.id,
+    criado,
+    conflitos: plano.acao === 'atualizar' ? plano.conflitos : [],
+    operadora: fatura.operadora ?? cliente.ennychat_operadora ?? null,
+    // 'vinculado' sem PDF no cliente (limpeza dos 40 dias apagou o arquivo): a extensão precisa reenviar.
+    pdf: anexo?.estado === 'vinculado' && !cliente.pdf_path ? 'aguardando' : estadoPdf(anexo),
+    ultimo_anexo_id: anexo?.anexo_id ?? null, // a extensão só baixa/envia o PDF se este anexo ainda não foi vinculado
+    pdf_motivo: anexo?.motivo ?? null,
+    pdf_atualizado_em: anexo?.atualizado_em ?? null,
+    pix: Boolean(cliente.pix_code) || pixSite,
+    pix_site: pixSite,
+  };
 }
 
 // ---------- POST /faturas/sync ----------
@@ -173,71 +341,50 @@ router.post('/faturas/sync', limiteImportacaoArquivo, async (req, res) => {
   try {
     const v = validarFatura(req.body);
     if (!v.ok) return res.json({ estado: 'erro_validacao', motivo: `campo_invalido:${v.campo}`, cliente_id: null, criado: false, conflitos: [], pdf: 'aguardando', pix: false });
-    const { fatura } = v;
-    const usuarioId = req.user.id;
-    const base = { cliente_id: null, criado: false, conflitos: [], pdf: 'aguardando', pix: false };
-
-    // Lista de permissão: nada é criado nem gravado fora dela.
     const { status_aceitos: aceitos } = await lerConfig();
-    const st = avaliarStatus(fatura.status_operador, aceitos);
-    if (!st.permitido) {
-      await registrarStatusConhecido(usuarioId, fatura.id_externo, fatura.status_operador); // fatura já cadastrada deixa de ser elegível
-      return res.json({ ...base, estado: 'bloqueado_status', motivo: st.motivo });
-    }
-    if (pagoOuEncerrado(fatura)) {
-      await registrarStatusConhecido(usuarioId, fatura.id_externo, STATUS_ENCERRADO);
-      return res.json({ ...base, estado: 'pendente_revisao', motivo: 'pagamento_ou_encerrado' });
-    }
-
-    const escolha = await escolherCliente(fatura, buscarClientes(usuarioId));
-    const plano = planejarSync({ usuarioId, fatura, escolha, agora: new Date().toISOString() });
-    if (plano.acao === 'pendente') return res.json({ ...base, estado: 'pendente_revisao', motivo: plano.motivo });
-
-    let cliente;
-    let criado = false;
-    if (plano.acao === 'criar') {
-      const { data, error } = await supabase.from('clientes').insert(plano.linha).select('*').single();
-      if (error?.code === '23505') {
-        // Corrida/duplicata (mesma fatura ou mesmo telefone): relê; se for a mesma fatura, é idempotência.
-        const existente = await clientePorFatura(usuarioId, fatura.id_externo);
-        if (!existente) return res.json({ ...base, estado: 'pendente_revisao', motivo: 'alvo_ambiguo' });
-        cliente = existente;
-      } else if (error) throw error;
-      else { cliente = data; criado = true; }
-    } else {
-      const { error } = await supabase.from('clientes').update(plano.campos).eq('id', plano.cliente.id).eq('usuario_id', usuarioId);
-      if (error) throw error;
-      if (Object.keys(plano.camposFatura).length) {
-        let camposFatura = plano.camposFatura;
-        let r = await propagarDadosFatura(plano.cliente.id, usuarioId, camposFatura);
-        if (r.error?.code === '23505' && 'numero_contrato' in camposFatura) {
-          // Outro cliente do usuário já tem esse contrato (índice único): grava o resto sem o contrato, em vez de dar 500.
-          const { numero_contrato: _omitido, ...semContrato } = camposFatura;
-          camposFatura = semContrato;
-          r = Object.keys(camposFatura).length ? await propagarDadosFatura(plano.cliente.id, usuarioId, camposFatura) : { error: null };
-        }
-        if (r.error) throw r.error;
-        plano.camposFatura = camposFatura;
-      }
-      cliente = { ...plano.cliente, ...plano.campos, ...plano.camposFatura };
-    }
-
-    const anexo = await ultimoAnexo(usuarioId, fatura.id_externo);
-    res.json({
-      estado: 'sincronizado',
-      motivo: null,
-      cliente_id: cliente.id,
-      criado,
-      conflitos: plano.acao === 'atualizar' ? plano.conflitos : [],
-      // 'vinculado' sem PDF no cliente (limpeza dos 40 dias apagou o arquivo): a extensão precisa reenviar.
-      pdf: anexo?.estado === 'vinculado' && !cliente.pdf_path ? 'aguardando' : estadoPdf(anexo),
-      ultimo_anexo_id: anexo?.anexo_id ?? null, // a extensão só baixa/envia o PDF se este anexo ainda não foi vinculado
-      pdf_motivo: anexo?.motivo ?? null,
-      pdf_atualizado_em: anexo?.atualizado_em ?? null,
-      pix: Boolean(cliente.pix_code),
-    });
+    res.json(await sincronizarFatura(req.user.id, v.fatura, aceitos, { m33: await temM33() }));
   } catch (err) {
     erro500(res, err, 'sync');
+  }
+});
+
+// ---------- POST /lote ----------
+// A extensão manda a página de clientes que o operador está vendo (até 50 linhas, já com as faturas embutidas). Mesma regra do
+// sync por fatura (lista de aceitos, operadora, pagamento), com UMA pré-busca dos cadastros já conhecidos para poupar consultas.
+router.post('/lote', limiteImportacaoArquivo, async (req, res) => {
+  try {
+    const itens = Array.isArray(req.body?.itens) ? req.body.itens.slice(0, 50) : null;
+    if (!itens) return res.status(400).json({ error: 'Envie itens.' });
+    // Sem a migration-33 não há como separar as operadoras (BG x Mega...): não importa em lote até ela rodar.
+    if (!(await temM33())) return res.status(503).json({ error: 'migration_33_pendente' });
+    const usuarioId = req.user.id;
+    const resultados = [];
+    const validos = [];
+    for (const it of itens) {
+      const v = validarFatura({ chave_operacao: 'lote', fatura: it });
+      if (v.ok) validos.push(v.fatura);
+      else resultados.push({ id_externo: typeof it?.id_externo === 'string' || typeof it?.id_externo === 'number' ? String(it.id_externo) : '', estado: 'erro_validacao', motivo: `campo_invalido:${v.campo}` });
+    }
+    if (validos.length) {
+      const [{ status_aceitos: aceitos }, m33] = await Promise.all([lerConfig(), temM33()]);
+      const { data: conhecidos, error } = await supabase.from('clientes').select('*').eq('usuario_id', usuarioId).in('ennychat_fatura_id', validos.map((f) => f.id_externo));
+      if (error) throw error;
+      const porFatura = new Map((conhecidos || []).map((c) => [c.ennychat_fatura_id, c]));
+      for (let i = 0; i < validos.length; i += 3) {
+        const grupo = validos.slice(i, i + 3);
+        const saidas = await Promise.all(grupo.map((f) =>
+          sincronizarFatura(usuarioId, f, aceitos, { m33, preCliente: porFatura.get(f.id_externo) ?? null })
+            .then((r) => ({ id_externo: f.id_externo, estado: r.estado, motivo: r.motivo ?? null, cliente_id: r.cliente_id ?? null, criado: r.criado === true }))
+            .catch((err) => {
+              logLimitado('ennychat-lote', 'error', '[ennychat] lote item:', descreverErro(err));
+              return { id_externo: f.id_externo, estado: 'erro', motivo: 'erro_interno' };
+            })));
+        resultados.push(...saidas);
+      }
+    }
+    res.json({ total: itens.length, resultados });
+  } catch (err) {
+    erro500(res, err, 'lote');
   }
 });
 
@@ -412,8 +559,15 @@ router.get('/faturas/:idExterno/pix', async (req, res) => {
     const { status_aceitos: aceitos } = await lerConfig();
     if (!avaliarStatus(cliente.ennychat_status, aceitos).permitido) return res.json({ estado: 'indisponivel', motivo: 'status_fora_da_lista' });
     const anexo = await ultimoAnexo(req.user.id, idExterno);
-    if (anexo?.estado !== 'vinculado' || !cliente.pdf_path || !cliente.pix_code) return res.json({ estado: 'indisponivel', motivo: 'sem_vinculo' });
-    res.json({ estado: 'ok', pix: cliente.pix_code, linha_digitavel: cliente.linha_digitavel ?? null });
+    if (anexo?.estado === 'vinculado' && cliente.pdf_path && cliente.pix_code) {
+      return res.json({ estado: 'ok', pix: cliente.pix_code, linha_digitavel: cliente.linha_digitavel ?? null, origem: 'pdf' });
+    }
+    // Sem boleto vinculado: Pix digitado pelo operador no EnnyChat (Desktop), já validado (CRC) ao sincronizar.
+    if (await temM33()) {
+      const { data: f } = await supabase.from('ennychat_faturas').select('pix_code').eq('usuario_id', req.user.id).eq('fatura_externa_id', idExterno).maybeSingle();
+      if (f?.pix_code && isValidPixPayload(f.pix_code)) return res.json({ estado: 'ok', pix: f.pix_code, linha_digitavel: null, origem: 'site' });
+    }
+    res.json({ estado: 'indisponivel', motivo: 'sem_vinculo' });
   } catch (err) {
     erro500(res, err, 'pix');
   }
@@ -426,13 +580,17 @@ router.get('/pendencias', async (req, res) => {
   try {
     res.set('Cache-Control', 'no-store');
     const { status_aceitos: aceitos } = await lerConfig();
-    const [cli, anx] = await Promise.all([
-      buscarTodos(() => supabase.from('clientes').select('id, nome, os_numero, valor, pdf_path, ennychat_fatura_id, ennychat_status, ennychat_status_em')
+    const m33 = await temM33();
+    const [cli, anx, fat] = await Promise.all([
+      buscarTodos(() => supabase.from('clientes').select(m33 ? 'id, nome, os_numero, valor, pdf_path, ennychat_fatura_id, ennychat_status, ennychat_status_em, ennychat_operadora' : 'id, nome, os_numero, valor, pdf_path, ennychat_fatura_id, ennychat_status, ennychat_status_em')
         .eq('usuario_id', req.user.id).eq('campanha', 'cobranca').not('ennychat_fatura_id', 'is', null).order('id')),
       buscarTodos(() => supabase.from('ennychat_anexos').select('fatura_externa_id, estado, motivo, atualizado_em').eq('usuario_id', req.user.id).order('id')),
+      m33 ? buscarTodos(() => supabase.from('ennychat_faturas').select('fatura_externa_id, pix_code').eq('usuario_id', req.user.id).not('pix_code', 'is', null).order('id')) : Promise.resolve({ data: [] }),
     ]);
     if (cli.error) throw cli.error;
     if (anx.error) throw anx.error;
+    if (fat.error) throw fat.error;
+    const comPixSite = new Set((fat.data || []).map((f) => f.fatura_externa_id));
     const ultimo = new Map();
     for (const a of anx.data || []) {
       const atual = ultimo.get(a.fatura_externa_id);
@@ -441,13 +599,14 @@ router.get('/pendencias', async (req, res) => {
     const itens = (cli.data || [])
       .filter((c) => avaliarStatus(c.ennychat_status, aceitos).permitido)
       .map((c) => ({ c, a: ultimo.get(c.ennychat_fatura_id) }))
-      .filter(({ c, a }) => !(a?.estado === 'vinculado' && c.pdf_path))
+      .filter(({ c, a }) => !(a?.estado === 'vinculado' && c.pdf_path) && !comPixSite.has(c.ennychat_fatura_id))
       .map(({ c, a }) => ({
         id_externo: c.ennychat_fatura_id,
         nome: c.nome,
         os: c.os_numero,
+        operadora: c.ennychat_operadora ?? null,
         estado: a?.estado ?? 'aguardando',
-        motivo: a?.motivo ?? (a?.estado === 'processando' ? null : MOTIVO_SEM_ANEXO(c)),
+        motivo: a?.motivo ?? (a?.estado === 'processando' ? null : OPERADORAS_SEM_PDF.has(c.ennychat_operadora) ? (c.valor === null || c.valor === undefined ? 'aguardando_valor' : 'aguardando_pix') : MOTIVO_SEM_ANEXO(c)),
         em: a?.atualizado_em ?? c.ennychat_status_em ?? null,
       }))
       .sort((x, y) => String(y.em ?? '').localeCompare(String(x.em ?? '')))

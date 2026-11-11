@@ -182,3 +182,73 @@ test('sync: contrato é buscado também pela chave só-dígitos da OS (lista cru
   await escolherCliente(f, async (c, v) => { vistos.push([c, v]); return []; });
   assert.deepEqual(vistos.find(([c]) => c === 'numero_contrato')[1], ['0012345', '12345']);
 });
+
+// ---- operadora, faturas da ficha e Pix do site ----
+import { ehFaturaIrma } from './cliente.js';
+
+test('validarFatura: operadora, todas as faturas da ficha e Pix bruto (lista branca)', () => {
+  const pix = '00020126580014br.gov.bcb.pix0136123e4567-e89b-12d3-a456-426655440000520400005303986540510.005802BR5913FULANO DE TAL6008BRASILIA62070503***6304ABCD';
+  const v = validarFatura(corpo({
+    operadora_slug: 'Claro-Fenix', codigo_pix: pix, data_pagamento: null,
+    faturas: [
+      { id: 24120, posicao: 1, mes_referencia: '2026-09-01', vencimento: '2026-10-15', valor: '69.93', status_pagamento: 'pendente', data_pagamento: null, codigo_pix: '', cpf: '123' },
+      { id: 28379, posicao: 2, mes_referencia: '2026-09-01', vencimento: '2026-11-15', valor: null, status_pagamento: 'pago', data_pagamento: '2026-11-02', codigo_pix: pix },
+      { id: '<script>', posicao: 3 },
+    ],
+  }));
+  assert.equal(v.ok, true);
+  assert.equal(v.fatura.operadora, 'claro-fenix');
+  assert.equal(v.fatura.codigo_pix, pix);
+  assert.equal(v.fatura.faturas.length, 2); // id inválido descartado
+  assert.deepEqual(Object.keys(v.fatura.faturas[0]).sort(), ['codigo_pix', 'data_pagamento', 'id', 'mes_referencia', 'posicao', 'status_pagamento', 'valor', 'vencimento']); // sem CPF
+  assert.equal(v.fatura.faturas[0].codigo_pix, null);
+  assert.equal(v.fatura.faturas[1].data_pagamento, '2026-11-02');
+  assert.equal(validarFatura(corpo({ operadora_slug: 'DROP TABLE' })).fatura.operadora, null);
+});
+
+test('operadora: nunca mistura (BG x Mega) e cadastro antigo adota na 1ª sincronização', () => {
+  const f = { ...fatura, operadora: 'claro-bg' };
+  const igual = { id: 'c1', nome: f.nome, ennychat_fatura_id: f.id_externo, ennychat_operadora: 'claro-bg', telefone: f.telefone };
+  const outra = { ...igual, ennychat_operadora: 'claro-mega' };
+  const antigo = { ...igual, ennychat_operadora: null };
+  const plan = (c) => planejarSync({ usuarioId: 'u', fatura: f, escolha: { tipo: 'unico', por: 'ennychat_fatura_id', cliente: c }, agora });
+  assert.equal(plan(igual).acao, 'atualizar');
+  assert.deepEqual(plan(outra), { acao: 'pendente', motivo: 'operadora_divergente' });
+  assert.equal(plan(antigo).campos.ennychat_operadora, 'claro-bg');
+  // criação grava a operadora
+  const criado = planejarSync({ usuarioId: 'u', fatura: f, escolha: { tipo: 'nenhum' }, agora });
+  assert.equal(criado.linha.ennychat_operadora, 'claro-bg');
+});
+
+test('escolherCliente: a busca por OS/contrato/telefone recebe a operadora (o banco exclui as outras)', async () => {
+  const vistos = [];
+  await escolherCliente({ ...fatura, operadora: 'desktop' }, async (c, v, op) => { vistos.push([c, op]); return []; });
+  assert.ok(vistos.length >= 2 && vistos.every(([, op]) => op === 'desktop'));
+});
+
+test('fatura irmã (Fatura 2 do mesmo cliente): só com mesma OS, mesma operadora conhecida e mesmo nome', () => {
+  const c = { id: 'c1', nome: fatura.nome, os_numero: '0012345', ennychat_fatura_id: '24120', ennychat_operadora: 'claro-fenix' };
+  const f2 = { ...fatura, id_externo: '28379', os_numero: '12345', operadora: 'claro-fenix' };
+  const escolha = { tipo: 'unico', por: 'os_numero', cliente: c };
+  assert.equal(ehFaturaIrma({ escolha, fatura: f2 }), true);
+  assert.equal(ehFaturaIrma({ escolha, fatura: { ...f2, operadora: 'claro-bg' } }), false); // outra operadora
+  assert.equal(ehFaturaIrma({ escolha, fatura: { ...f2, operadora: null } }), false); // operadora desconhecida: não arrisca
+  assert.equal(ehFaturaIrma({ escolha: { ...escolha, cliente: { ...c, ennychat_operadora: null } }, fatura: f2 }), false);
+  assert.equal(ehFaturaIrma({ escolha, fatura: { ...f2, nome: 'OUTRA PESSOA' } }), false);
+  assert.equal(ehFaturaIrma({ escolha, fatura: { ...f2, os_numero: '999' } }), false);
+  assert.equal(ehFaturaIrma({ escolha, fatura: { ...f2, id_externo: '24120' } }), false); // é a própria fatura
+  assert.equal(ehFaturaIrma({ escolha: { ...escolha, por: 'telefone' }, fatura: f2 }), false); // telefone compartilhado não vale
+});
+
+test('status espelho: volta a status aceito remove SÓ o bloqueio posto pela integração', () => {
+  const plan = (c) => planejarSync({ usuarioId: 'u', fatura, escolha: { tipo: 'unico', por: 'ennychat_fatura_id', cliente: c }, agora });
+  const base = { id: 'c1', nome: fatura.nome, ennychat_fatura_id: fatura.id_externo, telefone: fatura.telefone };
+  // bloqueio posto pela integração (ennychat_status = espelho): sai
+  const a = plan({ ...base, ennychat_status: 'numero_invalido', status_operador: 'numero_invalido' }).campos;
+  assert.equal(a.status_operador, null);
+  const b = plan({ ...base, ennychat_status: 'pago_ou_encerrado', status_operador: 'pagamento_confirmado' }).campos;
+  assert.equal(b.status_operador, null);
+  // o operador do SISTEMA marcou outro status por conta própria: não mexe
+  const c = plan({ ...base, ennychat_status: 'fatura_encaminhada', status_operador: 'numero_invalido' }).campos;
+  assert.equal('status_operador' in c, false);
+});

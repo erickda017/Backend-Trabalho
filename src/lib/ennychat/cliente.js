@@ -8,7 +8,7 @@
 import { normalizarVariantes } from '../telefone.js';
 import { nomeCanonico, osDoCodigo, vencimentoCanonico } from './vinculo.js';
 
-// buscar(criterio, valor) -> Promise<cliente[]>
+// buscar(criterio, valor, operadora) -> Promise<cliente[]>
 //   'ennychat_fatura_id' (texto) | 'os_numero' (texto, campanha cobranca) | 'telefone' (string[] de variantes, campanha cobranca)
 export async function escolherCliente(fatura, buscar) {
   const consultas = [
@@ -20,7 +20,7 @@ export async function escolherCliente(fatura, buscar) {
   ];
   for (const [criterio, valor] of consultas) {
     if (!valor || (Array.isArray(valor) && !valor.length)) continue;
-    const achados = await buscar(criterio, valor);
+    const achados = await buscar(criterio, valor, fatura.operadora ?? null); // a busca já exclui clientes de OUTRA operadora
     if (achados.length === 1) return { tipo: 'unico', por: criterio, cliente: achados[0] };
     if (achados.length > 1) return { tipo: 'ambiguo', por: criterio };
   }
@@ -28,6 +28,33 @@ export async function escolherCliente(fatura, buscar) {
 }
 
 const vazio = (v) => v === null || v === undefined || v === '';
+
+/**
+ * Status do EnnyChat que TÊM equivalente no sistema (clientes.status_operador, que BLOQUEIA o disparo de WhatsApp/e-mail):
+ * número inválido, pagamento confirmado/fatura paga e fraude. Os demais ficam só em ennychat_status.
+ */
+export const STATUS_SISTEMA = {
+  numero_invalido: 'numero_invalido',
+  pagamento_confirmado: 'pagamento_confirmado',
+  pago_ou_encerrado: 'pagamento_confirmado',
+  fraude: 'fraude',
+};
+
+
+/**
+ * Outra fatura (Fatura 2...) do MESMO cliente: achado por OS/contrato, já amarrado a OUTRA fatura do EnnyChat, mesma OS,
+ * mesma operadora (as DUAS conhecidas e iguais) e mesmo nome. Nesse caso a fatura é só registrada em ennychat_faturas e
+ * o cadastro não é alterado. Qualquer dúvida (operadora desconhecida/diferente, nome diferente) => NÃO é irmã.
+ */
+export function ehFaturaIrma({ escolha, fatura }) {
+  if (escolha?.tipo !== 'unico' || escolha.por === 'ennychat_fatura_id' || escolha.por === 'telefone') return false;
+  const c = escolha.cliente;
+  if (vazio(c.ennychat_fatura_id) || c.ennychat_fatura_id === fatura.id_externo) return false;
+  if (!fatura.operadora || c.ennychat_operadora !== fatura.operadora) return false;
+  const osC = osDoCodigo(c.os_numero ?? c.numero_contrato); // mesma chave de OS do vínculo (sem zeros à esquerda)
+  if (!osC || osC !== osDoCodigo(fatura.os_numero)) return false;
+  return nomeCanonico(c.nome) === nomeCanonico(fatura.nome);
+}
 const temAlternativos = (a) => a.telefones.length > 0 || a.emails.length > 0;
 
 // -> { acao: 'pendente', motivo }
@@ -58,6 +85,7 @@ export function planejarSync({ usuarioId, fatura, escolha, agora }) {
         valor: fatura.valor,
         vencimento: fatura.vencimento,
         ennychat_fatura_id: fatura.id_externo,
+        ennychat_operadora: fatura.operadora ?? null,
         contatos_alternativos: temAlternativos(fatura.alternativos) ? fatura.alternativos : null,
         ...status,
       },
@@ -68,6 +96,11 @@ export function planejarSync({ usuarioId, fatura, escolha, agora }) {
   // Achado por OS/telefone mas já amarrado a OUTRA fatura do EnnyChat: não reaproveita.
   if (!vazio(c.ennychat_fatura_id) && c.ennychat_fatura_id !== fatura.id_externo) {
     return { acao: 'pendente', motivo: 'outra_fatura' };
+  }
+
+  // Operadora: nunca mistura. As duas conhecidas e diferentes => não é o mesmo cliente (nada é gravado).
+  if (!vazio(c.ennychat_operadora) && fatura.operadora && c.ennychat_operadora !== fatura.operadora) {
+    return { acao: 'pendente', motivo: 'operadora_divergente' };
   }
 
   // Achado por OS/telefone (não pelo ID da fatura) com OUTRO nome: pode ser telefone compartilhado
@@ -99,7 +132,14 @@ export function planejarSync({ usuarioId, fatura, escolha, agora }) {
 
   preencher(campos, 'email', fatura.email);
   preencher(campos, 'os_numero', fatura.os_numero);
+  preencher(campos, 'ennychat_operadora', fatura.operadora); // cadastro antigo adota a operadora na 1ª sincronização
   preencher(campos, 'ennychat_fatura_id', fatura.id_externo);
+  // Voltou a um status aceito: se o bloqueio (número inválido/pago) foi posto POR esta integração, ele sai (nunca mexe em outro).
+  const espelho = STATUS_SISTEMA[c.ennychat_status];
+  if (espelho && c.status_operador === espelho) {
+    campos.status_operador = null;
+    campos.status_operador_atualizado_em = null;
+  }
   if (temAlternativos(fatura.alternativos)) preencher(campos, 'contatos_alternativos', fatura.alternativos);
   preencher(camposFatura, 'valor', fatura.valor);
   preencher(camposFatura, 'numero_contrato', fatura.os_numero);

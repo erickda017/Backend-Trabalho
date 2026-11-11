@@ -97,6 +97,41 @@ const emailValido = (v) => {
   return t && EMAIL_RE.test(t) ? t : null;
 };
 
+// Slug de operadora do EnnyChat ("desktop", "claro-fenix", "claro-bg", "claro-mega"...): só minúsculas, dígitos e hífen.
+const operadoraValida = (v) => {
+  const t = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  return /^[a-z0-9][a-z0-9-]{1,39}$/.test(t) ? t : null;
+};
+
+// Pix copia-e-cola bruto (a VALIDADE — CRC — é conferida no servidor com isValidPixPayload).
+const pixBruto = (v) => {
+  const t = typeof v === 'string' ? v.trim() : '';
+  return t.length >= 20 && t.length <= 800 && /^[ -~]+$/.test(t) ? t : null;
+};
+
+// Todas as faturas da ficha (Fatura 1, Fatura 2...). Lista branca: só o necessário. Item inválido é descartado.
+const MAX_FATURAS = 12;
+function listaFaturas(brutas) {
+  const saida = [];
+  for (const b of Array.isArray(brutas) ? brutas.slice(0, MAX_FATURAS) : []) {
+    if (!b || typeof b !== 'object') continue;
+    const id = typeof b.id === 'number' ? String(b.id) : b.id;
+    if (!idExternoValido(id)) continue;
+    const valor = converterValor(b.valor);
+    saida.push({
+      id,
+      posicao: Number.isInteger(b.posicao) && b.posicao >= 0 && b.posicao <= 1000 ? b.posicao : null,
+      mes_referencia: dataIsoValida(b.mes_referencia),
+      vencimento: dataIsoValida(b.vencimento),
+      valor: valor.ok ? valor.valor : null,
+      status_pagamento: textoOuNull(b.status_pagamento, 60),
+      data_pagamento: dataIsoValida(b.data_pagamento),
+      codigo_pix: pixBruto(b.codigo_pix),
+    });
+  }
+  return saida;
+}
+
 const mesmoTelefone = (a, b) => normalizarVariantes(a).some((v) => normalizarVariantes(b).includes(v));
 
 // Corpo de POST /faturas/sync -> { ok:true, chaveOperacao, fatura } | { ok:false, campo }.
@@ -147,6 +182,11 @@ export function validarFatura(body) {
         telefones: listaAlternativos(f.cliente_telefones, telefone, telefoneValido, mesmoTelefone),
         emails: listaAlternativos(f.cliente_emails, email, emailValido, (a, b) => a === b),
       },
+      // Operadora do cliente (nunca misturar BG com Mega, Desktop com Claro...) e todas as faturas da ficha.
+      operadora: operadoraValida(f.operadora_slug),
+      codigo_pix: pixBruto(f.codigo_pix), // Pix da fatura corrente (operadoras sem PDF, ex.: Desktop)
+      data_pagamento: dataIsoValida(f.data_pagamento),
+      faturas: listaFaturas(f.faturas),
     },
   };
 }

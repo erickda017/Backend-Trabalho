@@ -31,6 +31,9 @@ import supervisorRoutes from './routes/supervisor.routes.js';
 import exclusaoRoutes from './routes/exclusao.routes.js';
 import arquivosRoutes from './routes/arquivos.routes.js';
 import ennychatRoutes from './routes/ennychat.routes.js';
+import disparoEmailRoutes from './routes/disparoEmail.routes.js';
+import webhookBrevoRoutes from './routes/webhookBrevo.routes.js';
+import { recuperarEmailsTravados } from './services/emailDispatch.js';
 import faturasPendentesRoutes from './routes/faturasPendentes.routes.js';
 import safrasRoutes from './routes/safras.routes.js';
 import qualidadeRoutes from './routes/qualidade.routes.js';
@@ -162,6 +165,9 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+// Webhook da Brevo: pública (sem login), autenticada por segredo (BREVO_WEBHOOK_TOKEN) -- ver routes/webhookBrevo.routes.js
+app.use('/api/webhooks/brevo', webhookBrevoRoutes);
+
 // todas as rotas abaixo exigem login (Supabase Auth)
 app.use('/api/whatsapp', requireAuth, whatsappRoutes);
 app.use('/api/clientes', requireAuth, clientesRoutes);
@@ -194,6 +200,7 @@ app.use('/api/supervisor', requireAuth, requireSupervisor, supervisorRoutes);
 app.use('/api/arquivos', requireAuth, arquivosRoutes);
 app.use('/api/faturas', requireAuth, faturasPendentesRoutes);
 app.use('/api/integracoes/ennychat', requireAuth, ennychatRoutes);
+app.use('/api/disparo-email', requireAuth, disparoEmailRoutes);
 app.use('/api/safras', requireAuth, safrasRoutes);
 app.use('/api/qualidade', requireAuth, qualidadeRoutes);
 app.use('/api/ativacao-chip', requireAuth, ativacaoChipRoutes);
@@ -231,6 +238,9 @@ const server = app.listen(PORT, () => {
   iniciarConsolidacaoSafras();
   recuperarEnviosTravados().catch((err) =>
     console.error('[server] falha ao recuperar envios travados:', err.message || err)
+  );
+  recuperarEmailsTravados().catch((err) =>
+    console.error('[server] falha ao recuperar lotes de e-mail:', err.message || err)
   );
 });
 

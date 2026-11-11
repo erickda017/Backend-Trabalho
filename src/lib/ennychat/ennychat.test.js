@@ -81,7 +81,7 @@ test('sync: busca em ordem (fatura -> OS -> telefone) e ambíguo não cria nem a
 
 test('sync: achado por OS/telefone com nome diferente => revisão, nada gravado', () => {
   const cliente = { id: 9, nome: 'Outro Nome', telefone: '5511912345678', email: null };
-  assert.deepEqual(planejarSync({ usuarioId: 'u', fatura, escolha: { tipo: 'unico', por: 'telefone', cliente }, agora }), { acao: 'pendente', motivo: 'nome_divergente' });
+  assert.deepEqual(planejarSync({ usuarioId: 'u', fatura, escolha: { tipo: 'unico', por: 'telefone', cliente }, agora }), { acao: 'pendente', motivo: 'nome_divergente_cadastro' });
 });
 
 test('sync: existente só recebe campo vazio; divergência vira conflito sem sobrescrever', () => {

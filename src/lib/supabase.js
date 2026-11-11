@@ -14,9 +14,13 @@ dotenv.config();
 const url = process.env.SUPABASE_URL || 'https://placeholder.supabase.co';
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder-key';
 
-export const supabase = createClient(url, key, {
+// `let` + setter só para os testes injetarem um cliente em memória (live binding: quem importa enxerga a troca).
+export let supabase = createClient(url, key, {
   auth: { persistSession: false },
 });
+export function __usarClienteDeTeste(cliente) {
+  supabase = cliente;
+}
 
 export const BUCKET = process.env.SUPABASE_BUCKET || 'faturas';
 

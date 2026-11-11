@@ -67,7 +67,7 @@ export function planejarSync({ usuarioId, fatura, escolha, agora }) {
   // Achado por OS/telefone (não pelo ID da fatura) com OUTRO nome: pode ser telefone compartilhado
   // (família). Não cola a fatura nesse cadastro nem grava nada.
   if (escolha.por !== 'ennychat_fatura_id' && nomeCanonico(c.nome) !== nomeCanonico(fatura.nome)) {
-    return { acao: 'pendente', motivo: 'nome_divergente' };
+    return { acao: 'pendente', motivo: 'nome_divergente_cadastro' }; // não é o PDF: é o cadastro (ex.: telefone compartilhado)
   }
 
   const conflitos = [];

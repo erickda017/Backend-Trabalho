@@ -1,14 +1,15 @@
 import { Router } from 'express';
 import { buscarTodos } from '../lib/buscarTodos.js';
-import { supabase } from '../lib/supabase.js';
+import { supabase, BUCKET } from '../lib/supabase.js';
 import { descreverErro } from '../lib/redigir.js';
 import { logLimitado } from '../lib/log.js';
 import { limiteSensivel } from '../lib/rateLimit.js';
 import { comTrava } from '../lib/email/trava.js';
 import { casaBusca, ordenar, selecionar, calcularCota, LIMITE_POR_LOTE } from '../lib/email/selecao.js';
-import { MOTIVOS } from '../lib/email/elegibilidade.js';
-import { configuracaoBrevo } from '../lib/email/brevo.js';
-import { renderizarEmail, formatarValor } from '../lib/email/modelo.js';
+import { MOTIVOS, hojeBrt, vencimentoParaIso } from '../lib/email/elegibilidade.js';
+import { configuracaoBrevo, enviarTransacional } from '../lib/email/brevo.js';
+import { armazenamento } from '../lib/armazenamento.js';
+import { renderizarEmail, formatarValor, formatarDataIso, mesReferencia, mensagemFatura, primeiroNome, assuntoFatura } from '../lib/email/modelo.js';
 import { LIMITE_DIARIO, carregarLinhas, lerConfigEmail, usoDiario } from '../lib/email/dados.js';
 import { iniciarLote } from '../services/emailDispatch.js';
 
@@ -69,6 +70,35 @@ router.post('/preview', async (req, res) => {
     res.json({ html });
   } catch (err) {
     erro500(res, err, 'preview');
+  }
+});
+
+// Envio de TESTE: manda a fatura escolhida SOMENTE para o e-mail da conta logada (nunca para o cliente nem para endereço
+// informado na requisição). Não grava envio, não consome a "vez" da fatura e não conta no histórico/cota do lote.
+router.post('/teste', limiteSensivel, async (req, res) => {
+  try {
+    const brevo = configuracaoBrevo();
+    if (!brevo.configurado) return res.status(503).json({ error: 'Configuração da Brevo pendente.', faltando: brevo.faltando });
+    const para = typeof req.user?.email === 'string' ? req.user.email.trim() : '';
+    if (!para) return res.status(400).json({ error: 'Sua conta não tem e-mail cadastrado.' });
+    const clienteId = typeof req.body?.cliente_id === 'string' ? req.body.cliente_id : '';
+    const conf = await lerConfigEmail();
+    const empresa = conf.nomeEmpresa || (nomeEmpresaValido(req.body?.nome_empresa) ? req.body.nome_empresa.trim() : '');
+    if (!empresa) return res.status(400).json({ error: 'Informe o nome da empresa (nome_empresa) ou salve em Configurações do e-mail.' });
+    const { data: c } = await supabase.from('clientes').select('id, nome, valor, vencimento, pdf_path, ennychat_fatura_id').eq('id', clienteId).eq('usuario_id', req.user.id).eq('campanha', 'cobranca').maybeSingle();
+    if (!c?.pdf_path || c.valor == null || !c.vencimento) return res.status(409).json({ error: 'Fatura sem PDF, valor ou vencimento.' });
+    const baixado = await armazenamento.from(BUCKET).download(c.pdf_path);
+    if (baixado.error || !baixado.data) return res.status(502).json({ error: 'PDF indisponível.' });
+    const bytes = Buffer.from(await baixado.data.arrayBuffer());
+    if (!bytes.length || bytes.length > 4 * 1024 * 1024) return res.status(409).json({ error: 'PDF grande demais para e-mail (máx. 4 MB).' });
+    const iso = vencimentoParaIso(c.vencimento);
+    const mes = mesReferencia(iso);
+    const html = renderizarEmail({ empresa, primeiro_nome: primeiroNome(c.nome), mes_referencia: mes, vencimento: formatarDataIso(iso), valor: formatarValor(c.valor), mensagem: mensagemFatura(iso, hojeBrt()) });
+    const r = await enviarTransacional({ cfg: brevo, para, assunto: `[TESTE] ${assuntoFatura(mes)}`, html, anexoNome: 'fatura.pdf', anexoBase64: bytes.toString('base64') });
+    if (!r.ok) return res.status(502).json({ error: 'A Brevo não aceitou o envio de teste.', detalhe: r.erro });
+    res.json({ ok: true, para, message_id: r.messageId ?? null });
+  } catch (err) {
+    erro500(res, err, 'teste');
   }
 });
 

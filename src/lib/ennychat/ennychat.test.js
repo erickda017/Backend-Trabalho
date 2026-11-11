@@ -112,16 +112,18 @@ test('sync: repetir a mesma fatura (já vinculada) não duplica: ação é atual
 const alvo = { os_numero: '0012345', nome: 'Maria Fictícia da Silva', vencimento: '10/08/2026' };
 const lido = { codigo: '010/0012345', nome: 'MARIA FICTICIA DA SILVA', vencimento: '10/08/2026' };
 
-test('vínculo: OS + nome + vencimento iguais e Pix válido => vinculado (zeros preservados)', () => {
+test('vínculo: OS + nome + vencimento iguais e Pix válido => vinculado (chave de OS do site)', () => {
   const r = avaliarVinculo({ alvo, extraido: lido, pixValido: true });
   assert.equal(r.estado, 'vinculado');
   assert.deepEqual(r.verificacoes, { os: true, nome: true, vencimento: true, pix: true });
-  assert.equal(osDoCodigo('010/0012345'), '0012345');
+  assert.equal(osDoCodigo('010/0012345'), '12345'); // mesma regra do site (chaveOs): depois da barra, sem zeros à esquerda
+  assert.equal(osDoCodigo('0012345'), '12345');
+  assert.equal(osDoCodigo('013/003498697'), osDoCodigo('3498697')); // prefixo antes da barra não conta
 });
 
 test('vínculo: cada divergência/ausência individual => pendente com motivo', () => {
   const caso = (a, e, pix = true) => avaliarVinculo({ alvo: { ...alvo, ...a }, extraido: { ...lido, ...e }, pixValido: pix });
-  assert.equal(caso({}, { codigo: '010/12345' }).motivo, 'os_divergente'); // sem zero à esquerda != com zero
+  assert.equal(caso({}, { codigo: '010/0099999' }).motivo, 'os_divergente');
   assert.equal(caso({}, { nome: 'MARIA FICTICIA SILVA' }).motivo, 'nome_divergente'); // sem aproximação
   assert.equal(caso({}, { vencimento: '11/08/2026' }).motivo, 'vencimento_divergente');
   assert.equal(caso({}, {}, false).motivo, 'sem_pix');

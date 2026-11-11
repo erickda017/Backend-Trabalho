@@ -10,14 +10,15 @@ export function ehPdf(buffer) {
   return Buffer.isBuffer(buffer) && buffer.length >= 8 && buffer.subarray(0, 5).toString('latin1') === '%PDF-';
 }
 
-// Código do boleto "010/022067040" -> "022067040" (trecho depois da "/"). Texto,
-// zeros preservados. O cadastro (venda_os) passa pela MESMA função, então
-// tanto "022067040" quanto "010/022067040" lá comparam certo.
+// Chave da OS = a MESMA regra do site (frontend/src/lib/casarPlanilhaPix.ts, chaveOs): trecho depois da última
+// "/", só dígitos, sem zeros à esquerda. "010/022067040" e "22067040" => "22067040". O que vem ANTES da barra
+// (prefixo do boleto) não entra na comparação. Aplicada aos dois lados (cadastro e PDF); sem dígitos => null.
 export function osDoCodigo(valor) {
   if (valor === null || valor === undefined) return null;
-  const s = String(valor).replace(/\s+/g, '');
-  const parte = s.slice(s.lastIndexOf('/') + 1);
-  return parte || null;
+  const s = String(valor);
+  const depoisDaBarra = s.includes('/') ? s.slice(s.lastIndexOf('/') + 1) : s;
+  const chave = depoisDaBarra.replace(/\D/g, '').replace(/^0+/, '');
+  return chave || null;
 }
 
 // Só caixa/acento/espaços -- nada de "contém" ou parecido.

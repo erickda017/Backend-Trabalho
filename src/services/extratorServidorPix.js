@@ -173,22 +173,27 @@ async function renderizarRegiao(pagina, regiao, alvoPx, criarCanvas) {
   return canvas;
 }
 
-async function extrairPixDaPagina(pagina, indicePagina, criarCanvas) {
-  let canvas = await renderizarRegiao(pagina, REGIAO_CANTO_JUSTA, ALVO_PX_CANTO, criarCanvas);
-  let pix = lerQrDoCanvas(canvas.getContext('2d'), canvas.width, canvas.height);
-  liberarCanvas(canvas);
-  if (pix) return { pixCopiaCola: pix, pagina: indicePagina + 1, origem: 'canto' };
+// [2026-11] Modo `completo` (usado pela integração EnnyChat): mesmas estratégias do extrator do navegador
+// (frontend/src/lib/pixExtractor.ts) -- 4 páginas e 2 resoluções por região. O modo padrão continua conservador
+// (3 páginas, 1 resolução) pra não pesar na RAM do plano free.
+const ALVOS_PADRAO = { canto: [ALVO_PX_CANTO], ampla: [ALVO_PX_CANTO], inteira: [ALVO_PX_PAGINA_INTEIRA] };
+const ALVOS_COMPLETO = { canto: [1800, 2600], ampla: [2200, 2800], inteira: [1800, 2600] };
+const MAX_PAGINAS_COMPLETO = 4;
 
-  canvas = await renderizarRegiao(pagina, REGIAO_CANTO_AMPLA, ALVO_PX_CANTO, criarCanvas);
-  pix = lerQrDoCanvas(canvas.getContext('2d'), canvas.width, canvas.height);
-  liberarCanvas(canvas);
-  if (pix) return { pixCopiaCola: pix, pagina: indicePagina + 1, origem: 'canto-ampliado' };
-
-  canvas = await renderizarRegiao(pagina, REGIAO_PAGINA_INTEIRA, ALVO_PX_PAGINA_INTEIRA, criarCanvas);
-  pix = lerQrDoCanvas(canvas.getContext('2d'), canvas.width, canvas.height);
-  liberarCanvas(canvas);
-  if (pix) return { pixCopiaCola: pix, pagina: indicePagina + 1, origem: 'pagina-inteira' };
-
+async function extrairPixDaPagina(pagina, indicePagina, criarCanvas, alvos = ALVOS_PADRAO) {
+  const tentativas = [
+    [REGIAO_CANTO_JUSTA, alvos.canto, 'canto'],
+    [REGIAO_CANTO_AMPLA, alvos.ampla, 'canto-ampliado'],
+    [REGIAO_PAGINA_INTEIRA, alvos.inteira, 'pagina-inteira'],
+  ];
+  for (const [regiao, pxs, origem] of tentativas) {
+    for (const px of pxs) {
+      const canvas = await renderizarRegiao(pagina, regiao, px, criarCanvas);
+      const pix = lerQrDoCanvas(canvas.getContext('2d'), canvas.width, canvas.height);
+      liberarCanvas(canvas);
+      if (pix) return { pixCopiaCola: pix, pagina: indicePagina + 1, origem };
+    }
+  }
   return null;
 }
 
@@ -196,7 +201,7 @@ async function extrairPixDaPagina(pagina, indicePagina, criarCanvas) {
 // escrito pelo multer diskStorage -- ver routes/pix.routes.js). SEMPRE
 // enfileirado (ver executarSequencial) -- só 1 execução real por vez neste
 // processo, não importa quantas chamadas cheguem ao mesmo tempo.
-export async function extrairPixDeArquivoNoServidor(caminhoArquivo) {
+export async function extrairPixDeArquivoNoServidor(caminhoArquivo, { completo = false } = {}) {
   return executarSequencial(async () => {
     const [pdfjsLib, { createCanvas }] = await Promise.all([carregarPdfjs(), carregarCanvas()]);
     const fabricaCanvas = criarFabricaCanvas(createCanvas);
@@ -220,12 +225,12 @@ export async function extrairPixDeArquivoNoServidor(caminhoArquivo) {
         isEvalSupported: false,
       }).promise;
 
-      const totalPaginas = Math.min(doc.numPages, MAX_PAGINAS_POR_PDF);
+      const totalPaginas = Math.min(doc.numPages, completo ? MAX_PAGINAS_COMPLETO : MAX_PAGINAS_POR_PDF);
       for (let indice = 0; indice < totalPaginas; indice++) {
         let pagina = null;
         try {
           pagina = await doc.getPage(indice + 1);
-          const resultado = await extrairPixDaPagina(pagina, indice, (w, h) => fabricaCanvas.create(w, h).canvas);
+          const resultado = await extrairPixDaPagina(pagina, indice, (w, h) => fabricaCanvas.create(w, h).canvas, completo ? ALVOS_COMPLETO : ALVOS_PADRAO);
           if (resultado) return resultado;
         } finally {
           if (pagina && typeof pagina.cleanup === 'function') {

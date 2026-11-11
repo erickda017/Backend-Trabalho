@@ -252,3 +252,16 @@ test('status espelho: volta a status aceito remove SÓ o bloqueio posto pela int
   const c = plan({ ...base, ennychat_status: 'fatura_encaminhada', status_operador: 'numero_invalido' }).campos;
   assert.equal('status_operador' in c, false);
 });
+
+// ---- token da extensão ----
+import { ehTokenExtensao, gerarToken, hashToken } from '../tokenExtensao.js';
+
+test('token da extensão: formato, hash estável e recusa de lixo', () => {
+  const t = gerarToken();
+  assert.ok(t.startsWith('vxe_') && ehTokenExtensao(t));
+  assert.notEqual(gerarToken(), t);
+  assert.equal(hashToken(t), hashToken(t));
+  assert.equal(hashToken(t).length, 64);
+  assert.ok(!hashToken(t).includes(t)); // o hash não contém o token
+  for (const x of [null, '', 'vxe_', 'Bearer abc', 'eyJhbGciOi.jwt.assim', 'vxe_' + 'a'.repeat(100)]) assert.equal(ehTokenExtensao(x), false);
+});

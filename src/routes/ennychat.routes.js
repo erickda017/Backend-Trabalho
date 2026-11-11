@@ -5,7 +5,7 @@ import { supabase, BUCKET } from '../lib/supabase.js';
 import { armazenamento } from '../lib/armazenamento.js';
 import { propagarDadosFatura } from '../lib/faturaPropagacao.js';
 import { comTratamentoDeErroUpload } from '../lib/uploadComTratamentoDeErro.js';
-import { limiteImportacaoArquivo } from '../lib/rateLimit.js';
+import { limiteImportacaoArquivo, limiteSensivel } from '../lib/rateLimit.js';
 import { descreverErro } from '../lib/redigir.js';
 import { logLimitado } from '../lib/log.js';
 import { avaliarStatus, idExternoValido, pagoOuEncerrado, validarCamposAnexo, validarFatura, validarItensCatalogo } from '../lib/ennychat/payload.js';
@@ -15,6 +15,7 @@ import { avaliarVinculo, ehPdf } from '../lib/ennychat/vinculo.js';
 import { lerBoletoPdf } from '../services/ennychatPdf.js';
 import { persistirExtracaoPix } from '../lib/pixPersistencia.js';
 import { buscarTodos } from '../lib/buscarTodos.js';
+import { criarToken, revogarTokens } from '../lib/tokenExtensao.js';
 
 // Integração EnnyChat (recebimento). Contrato: ENNYCHAT_CONTRATO.md (raiz do projeto).
 // Tudo escopado por req.user.id; `responsavel` do EnnyChat nunca é usado.
@@ -31,6 +32,29 @@ const erro500 = (res, err, ctx) => {
   logLimitado(`ennychat-${ctx}`, 'error', `[ennychat] ${ctx}:`, descreverErro(err));
   return res.status(500).json({ error: 'Não foi possível processar agora. Tente novamente.' });
 };
+
+// ---------- token da extensão ----------
+// A extensão pede UM token a partir da sessão do site (uma vez) e depois fala sozinha, sem login com senha (que derrubaria a
+// sessão do site: o Supabase deste projeto aceita uma sessão por usuário). Só uma sessão normal cria/revoga token.
+router.post('/token-extensao', limiteSensivel, async (req, res) => {
+  try {
+    if (req.user.via === 'extensao') return res.status(403).json({ error: 'Use a sessão do site para gerar o token.' });
+    res.set('Cache-Control', 'no-store');
+    res.json({ token: await criarToken(req.user.id) });
+  } catch (err) {
+    if (err?.code === '42P01') return res.status(503).json({ error: 'migration_34_pendente' });
+    erro500(res, err, 'token-extensao');
+  }
+});
+
+router.delete('/token-extensao', limiteSensivel, async (req, res) => {
+  try {
+    await revogarTokens(req.user.id);
+    res.json({ ok: true });
+  } catch (err) {
+    erro500(res, err, 'token-extensao-del');
+  }
+});
 
 // ---------- config global ----------
 // Cache curto: sync/anexo leem a config a cada chamada da extensão. Invalida ao gravar; vale só para este processo

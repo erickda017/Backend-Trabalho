@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase.js';
 import { logLimitado } from '../lib/log.js';
+import { ehTokenExtensao, usuarioDoToken } from '../lib/tokenExtensao.js';
 
 // Verifica o token JWT do Supabase Auth enviado no header Authorization: Bearer <token>
 export async function requireAuth(req, res, next) {
@@ -8,6 +9,15 @@ export async function requireAuth(req, res, next) {
 
   if (!token) {
     return res.status(401).json({ error: 'Não autenticado' });
+  }
+
+  // Token da extensão (não é sessão do Supabase): vale SÓ para a integração do EnnyChat e nunca para criar outro token.
+  if (ehTokenExtensao(token)) {
+    if (!(req.originalUrl || '').startsWith('/api/integracoes/ennychat/')) return res.status(401).json({ error: 'Sessão inválida ou expirada' });
+    const usuarioId = await usuarioDoToken(token).catch(() => null);
+    if (!usuarioId) return res.status(401).json({ error: 'Sessão inválida ou expirada' });
+    req.user = { id: usuarioId, via: 'extensao', role: 'operador' };
+    return next();
   }
 
   const { data, error } = await supabase.auth.getUser(token);

@@ -6,7 +6,7 @@
 // Mais de um candidato => ambíguo (nada é criado nem alterado). Cliente existente só recebe campo
 // que estava VAZIO; divergência volta em `conflitos` e NUNCA sobrescreve.
 import { normalizarVariantes } from '../telefone.js';
-import { nomeCanonico, vencimentoCanonico } from './vinculo.js';
+import { nomeCanonico, osDoCodigo, vencimentoCanonico } from './vinculo.js';
 
 // buscar(criterio, valor) -> Promise<cliente[]>
 //   'ennychat_fatura_id' (texto) | 'os_numero' (texto, campanha cobranca) | 'telefone' (string[] de variantes, campanha cobranca)
@@ -14,7 +14,8 @@ export async function escolherCliente(fatura, buscar) {
   const consultas = [
     ['ennychat_fatura_id', fatura.id_externo],
     ['os_numero', fatura.os_numero],
-    ['numero_contrato', fatura.os_numero], // clientes vindos da lista crua guardam a OS como contrato
+    // clientes vindos da lista crua guardam a OS como contrato (às vezes sem zeros à esquerda / sem prefixo)
+    ['numero_contrato', fatura.os_numero ? [...new Set([fatura.os_numero, osDoCodigo(fatura.os_numero)].filter(Boolean))] : null],
     ['telefone', fatura.telefone ? normalizarVariantes(fatura.telefone) : null],
   ];
   for (const [criterio, valor] of consultas) {

@@ -54,15 +54,16 @@ export async function enviarTransacional({ cfg, para, assunto, html, anexoNome, 
 // A API de listagem filtra por DATA (YYYY-MM-DD): consulta ontem..hoje e filtra pelo instante aqui.
 // Achou => já foi aceito (devolve o messageId). Não achou => ainda pode não ter sido indexado: quem chama espera e tenta
 // de novo antes de repetir. null = não consegui consultar (continua incerto: NÃO repete).
-export async function procurarEnvioRecente({ cfg, para, assunto, desdeIso }, fetchImpl = fetch) {
+export async function procurarEnvioRecente({ cfg, para, assunto, desdeIso, ignorarMessageIds = [] }, fetchImpl = fetch) {
   const desde = Date.parse(desdeIso);
+  const ignorar = new Set(ignorarMessageIds.map(String)); // já pertencem a outro envio nosso (mesma pessoa, 2 faturas no mês)
   const dia = (ms) => new Date(ms).toISOString().slice(0, 10);
   const url = `${BASE}/smtp/emails?email=${encodeURIComponent(para)}&startDate=${dia(desde - 86_400_000)}&endDate=${dia(Date.now() + 86_400_000)}&limit=20&sort=desc`;
   try {
     const r = await fetchImpl(url, { headers: { 'api-key': cfg.apiKey, accept: 'application/json' }, signal: AbortSignal.timeout(20_000) });
     if (!r.ok) return null;
     const json = await r.json();
-    const achado = (json?.transactionalEmails ?? []).find((e) => e?.subject === assunto && e?.messageId && !(Date.parse(e.date) < desde));
+    const achado = (json?.transactionalEmails ?? []).find((e) => e?.subject === assunto && e?.messageId && !ignorar.has(String(e.messageId)) && !(Date.parse(e.date) < desde));
     return { encontrado: Boolean(achado), messageId: achado?.messageId ? String(achado.messageId) : null };
   } catch {
     return null;

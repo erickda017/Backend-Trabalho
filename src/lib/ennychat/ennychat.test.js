@@ -175,3 +175,10 @@ test('campos que o site recebia da lista crua: contrato (= OS), tipo da fatura p
   assert.equal(validarCamposAnexo({ anexo_id: '1', status_operador: 'A' }).origem, 'download');
 });
 
+
+test('sync: contrato é buscado também pela chave só-dígitos da OS (lista crua sem zeros)', async () => {
+  const f = { ...fatura, os_numero: '0012345' };
+  const vistos = [];
+  await escolherCliente(f, async (c, v) => { vistos.push([c, v]); return []; });
+  assert.deepEqual(vistos.find(([c]) => c === 'numero_contrato')[1], ['0012345', '12345']);
+});

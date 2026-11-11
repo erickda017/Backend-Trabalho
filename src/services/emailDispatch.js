@@ -119,7 +119,9 @@ async function processarItem(item, lote, deps) {
     if (r.tipo === 'incerto') {
       // Pode ter sido aceito: reconcilia com a Brevo ANTES de repetir -- duas consultas (a listagem demora a indexar).
       // Sem resposta da consulta = NÃO repete (fica incerto e bloqueado até reenvio explícito).
-      const consulta = () => procurar({ cfg, para: pedido.para, assunto, desdeIso: new Date(comecou.getTime() - 60_000).toISOString() });
+      const { data: jaUsados } = await supabase.from('email_envios').select('message_id').eq('email', pedido.para).not('message_id', 'is', null).neq('id', item.id);
+      const ignorarMessageIds = (jaUsados || []).map((e) => e.message_id);
+      const consulta = () => procurar({ cfg, para: pedido.para, assunto, desdeIso: new Date(comecou.getTime() - 60_000).toISOString(), ignorarMessageIds });
       let q = await consulta();
       if (q?.encontrado === false) {
         await dormir(deps.esperaReconciliarMs ?? 8000);

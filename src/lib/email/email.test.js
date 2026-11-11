@@ -172,3 +172,10 @@ test('modelo: texto muda para cliente em atraso (sem "antecedência" nem "antes 
   assert.equal(/\{\{/.test(atraso), false);
 });
 
+
+test('reconciliação: ignora e-mail da Brevo já registrado para outro envio (mesmo destinatário e assunto)', async () => {
+  const q = { cfg: { apiKey: 'k' }, para: 'a@b.c', assunto: 'S', desdeIso: '2026-11-10T12:00:00Z', ignorarMessageIds: ['<outra-fatura>'] };
+  const resp = (json) => async () => ({ ok: true, json: async () => json });
+  const lista = { transactionalEmails: [{ subject: 'S', messageId: '<outra-fatura>', date: '2026-11-10T12:00:30Z' }] };
+  assert.deepEqual(await procurarEnvioRecente(q, resp(lista)), { encontrado: false, messageId: null });
+});

@@ -31,18 +31,29 @@ const erro500 = (res, err, ctx) => {
 };
 
 // ---------- config global ----------
+// Cache curto: sync/anexo leem a config a cada chamada da extensão. Invalida ao gravar; vale só para este processo
+// (o worker de e-mail NÃO usa este cache: revalida a política direto no banco antes de cada envio).
+const CONFIG_TTL_MS = 10_000;
+let configCache = null;
 async function lerConfig() {
+  if (configCache && Date.now() - configCache.em < CONFIG_TTL_MS) return configCache.valor;
   const { data, error } = await supabase.from('ennychat_config').select('chave, valor');
   if (error) throw error;
   const mapa = Object.fromEntries((data || []).map((l) => [l.chave, l.valor]));
-  return {
+  const valor = {
     status_aceitos: Array.isArray(mapa.status_aceitos) ? mapa.status_aceitos : [],
     catalogo: Array.isArray(mapa.catalogo) ? mapa.catalogo : [],
   };
+  configCache = { valor, em: Date.now() };
+  return valor;
 }
 
-const gravarConfig = (chave, valor) =>
-  supabase.from('ennychat_config').upsert({ chave, valor, atualizado_em: new Date().toISOString() }, { onConflict: 'chave' });
+const gravarConfig = async (chave, valor) => {
+  configCache = null;
+  const r = await supabase.from('ennychat_config').upsert({ chave, valor, atualizado_em: new Date().toISOString() }, { onConflict: 'chave' });
+  configCache = null;
+  return r;
+};
 
 router.get('/config', async (req, res) => {
   try {
@@ -143,6 +154,19 @@ async function registrarNaAbaPix({ usuarioId, cliente, lido }) {
   }
 }
 
+// Fatura JÁ cadastrada que passou a status fora da lista (ou paga/encerrada): grava o novo status (nunca cria nada).
+// Não está na lista de aceitos, então o Disparo / E-mail deixa de considerá-la; um sync posterior com status aceito restaura.
+const STATUS_ENCERRADO = 'pago_ou_encerrado';
+async function registrarStatusConhecido(usuarioId, idExterno, status) {
+  if (typeof status !== 'string' || !status.trim()) return;
+  try {
+    await supabase.from('clientes').update({ ennychat_status: status.slice(0, 100), ennychat_status_em: new Date().toISOString() })
+      .eq('usuario_id', usuarioId).eq('ennychat_fatura_id', idExterno);
+  } catch (err) {
+    logLimitado('ennychat-status-conhecido', 'error', '[ennychat] registrar status:', descreverErro(err));
+  }
+}
+
 // ---------- POST /faturas/sync ----------
 router.post('/faturas/sync', limiteImportacaoArquivo, async (req, res) => {
   try {
@@ -155,8 +179,14 @@ router.post('/faturas/sync', limiteImportacaoArquivo, async (req, res) => {
     // Lista de permissão: nada é criado nem gravado fora dela.
     const { status_aceitos: aceitos } = await lerConfig();
     const st = avaliarStatus(fatura.status_operador, aceitos);
-    if (!st.permitido) return res.json({ ...base, estado: 'bloqueado_status', motivo: st.motivo });
-    if (pagoOuEncerrado(fatura)) return res.json({ ...base, estado: 'pendente_revisao', motivo: 'pagamento_ou_encerrado' });
+    if (!st.permitido) {
+      await registrarStatusConhecido(usuarioId, fatura.id_externo, fatura.status_operador); // fatura já cadastrada deixa de ser elegível
+      return res.json({ ...base, estado: 'bloqueado_status', motivo: st.motivo });
+    }
+    if (pagoOuEncerrado(fatura)) {
+      await registrarStatusConhecido(usuarioId, fatura.id_externo, STATUS_ENCERRADO);
+      return res.json({ ...base, estado: 'pendente_revisao', motivo: 'pagamento_ou_encerrado' });
+    }
 
     const escolha = await escolherCliente(fatura, buscarClientes(usuarioId));
     const plano = planejarSync({ usuarioId, fatura, escolha, agora: new Date().toISOString() });
@@ -259,9 +289,14 @@ router.post('/faturas/:idExterno/anexo', limiteImportacaoArquivo, uploadPdf, asy
 
         (existente.estado === 'pendente_revisao' && (idade > REPROCESSAR_PENDENTE_APOS_MS || campos.origem === 'upload')) ||
         (existente.estado === 'processando' && idade > REPROCESSAR_PROCESSANDO_APOS_MS);
-      if (!reprocessar) return res.json(resposta(cliente0, existente.estado, existente.motivo, existente.verificacoes, { repetido: true }));
+      // Mesmo conteúdo com outro anexo_id (arquivo subido de novo): passa a valer o id novo, senão a extensão reenviaria sempre.
+      const novoId = porAnexo ? {} : { anexo_id: campos.anexoId };
+      if (!reprocessar) {
+        if (!porAnexo) await supabase.from('ennychat_anexos').update(novoId).eq('id', existente.id);
+        return res.json(resposta(cliente0, existente.estado, existente.motivo, existente.verificacoes, { repetido: true }));
+      }
       linhaId = existente.id;
-      await supabase.from('ennychat_anexos').update({ estado: 'processando', motivo: null, cliente_id: cliente0.id, atualizado_em: new Date().toISOString() }).eq('id', linhaId);
+      await supabase.from('ennychat_anexos').update({ ...novoId, estado: 'processando', motivo: null, cliente_id: cliente0.id, atualizado_em: new Date().toISOString() }).eq('id', linhaId);
     } else {
       const { data, error } = await supabase.from('ennychat_anexos')
         .insert({ ...chave, sha256, estado: 'processando', cliente_id: cliente0.id }).select('id').single();

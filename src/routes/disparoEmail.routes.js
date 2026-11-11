@@ -8,7 +8,7 @@ import { casaBusca, ordenar, selecionar, calcularCota, LIMITE_POR_LOTE } from '.
 import { MOTIVOS } from '../lib/email/elegibilidade.js';
 import { configuracaoBrevo } from '../lib/email/brevo.js';
 import { renderizarEmail, formatarValor } from '../lib/email/modelo.js';
-import { JANELA_DIAS, LIMITE_DIARIO, STATUS_MAX_IDADE_H, carregarLinhas, lerConfigEmail, usoDiario } from '../lib/email/dados.js';
+import { LIMITE_DIARIO, carregarLinhas, lerConfigEmail, usoDiario } from '../lib/email/dados.js';
 import { iniciarLote } from '../services/emailDispatch.js';
 
 // Aba "Disparo / E-mail". Tudo escopado por req.user.id. O envio só existe com a Brevo configurada no ambiente.
@@ -30,8 +30,6 @@ async function painel() {
       disponibilidade: { configurado: brevo.configurado, faltando: brevo.faltando, nome_empresa_definido: Boolean(conf.nomeEmpresa), webhook_configurado: Boolean(process.env.BREVO_WEBHOOK_TOKEN?.trim()) },
       nome_empresa: conf.nomeEmpresa,
       limite_por_lote: LIMITE_POR_LOTE,
-      janela_dias: JANELA_DIAS,
-      status_max_idade_horas: STATUS_MAX_IDADE_H,
       // saldo local da conta Brevo (compartilhada): pode estar defasado se outros canais também enviam
       saldo: { limite_diario: LIMITE_DIARIO, usados: uso.usados, reservados: uso.reservados, disponivel: cota.disponivel, compartilhado: true, aviso: 'Saldo conhecido por este sistema; outros canais da mesma conta Brevo podem consumir a cota.' },
       status_aceitos: conf.statusAceitos,

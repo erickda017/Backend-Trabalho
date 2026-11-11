@@ -1,7 +1,7 @@
 // Disparo / E-mail -- quem pode entrar no lote. PURO (sem banco/rede): a rota e o worker só montam as entradas.
-// Regra padrão (todas precisam valer): e-mail válido, valor, vencimento FUTURO dentro da janela de envio, PDF vinculado
-// pelo fluxo que valida OS+nome+vencimento, status do EnnyChat na lista de aceitos E verificado recentemente, e nenhum
-// envio aceito antes (reenvio é intencional e fica fora da seleção padrão).
+// Regra (todas precisam valer): e-mail válido, valor, vencimento válido (qualquer data: cliente atrasado também recebe),
+// PDF vinculado pelo fluxo que valida OS+nome+vencimento, status do EnnyChat na lista de aceitos, e nenhum envio
+// aceito antes (reenvio é intencional e fica fora da seleção padrão).
 
 const EMAIL_RE = /^[^\s@,;<>"']{1,64}@[^\s@,;<>"']+\.[^\s@,;<>"']{2,}$/; // sem aspas/vírgula/<>: a Brevo recusaria
 export const emailValido = (v) => typeof v === 'string' && v.length <= 254 && EMAIL_RE.test(v.trim());
@@ -30,11 +30,8 @@ export const MOTIVOS = {
   email_invalido: 'E-mail ausente ou inválido',
   sem_valor: 'Sem valor',
   sem_vencimento: 'Sem vencimento válido',
-  vencida: 'Fatura vencida ou vencendo hoje',
-  fora_da_janela: 'Fora do período de envio',
   sem_pdf_validado: 'PDF não vinculado (OS, nome e vencimento)',
   status_bloqueado: 'Status do EnnyChat não aceito',
-  status_desatualizado: 'Status do EnnyChat precisa ser verificado (abra Tratar)',
   ja_enviado: 'Já enviado',
   envio_incerto: 'Envio anterior sem confirmação (confira na Brevo antes de reenviar)',
   envio_em_andamento: 'Envio em andamento',
@@ -48,34 +45,20 @@ export const MOTIVOS = {
  * @param {number} p.incertos  envios cujo resultado ficou incerto (interrompido / erro após o envio / sem confirmação)
  * @param {boolean} p.ativo  há envio na fila/processando
  * @param {string[]} p.statusAceitos
- * @param {string} p.hoje  YYYY-MM-DD (fuso da operação)
- * @param {number} p.janelaDias  envia só se faltam entre 1 e janelaDias dias
- * @param {number} p.statusMaxIdadeH
- * @param {number} p.agoraMs
  * @returns {{ elegivel: boolean, motivos: string[] }}
  */
-export function avaliarElegibilidade({ cliente, pdfValidado, aceitos = 0, incertos = 0, ativo = false, statusAceitos, hoje, janelaDias, statusMaxIdadeH, agoraMs }) {
+export function avaliarElegibilidade({ cliente, pdfValidado, aceitos = 0, incertos = 0, ativo = false, statusAceitos }) {
   const motivos = [];
   if (!emailValido(cliente?.email)) motivos.push('email_invalido');
   if (!(Number(cliente?.valor) > 0)) motivos.push('sem_valor');
 
-  const iso = vencimentoParaIso(cliente?.vencimento);
-  if (!iso) motivos.push('sem_vencimento');
-  else {
-    const dias = diasEntre(hoje, iso);
-    if (dias < 1) motivos.push('vencida');
-    else if (dias > janelaDias) motivos.push('fora_da_janela');
-  }
+  if (!vencimentoParaIso(cliente?.vencimento)) motivos.push('sem_vencimento');
 
   if (!pdfValidado || !cliente?.pdf_path) motivos.push('sem_pdf_validado');
 
-  // Política de status: lista de permissão vigente + status verificado há pouco (o worker não tem a sessão do EnnyChat).
+  // Política de status: lista de permissão vigente (lista vazia ou status fora dela = não entra).
   const st = cliente?.ennychat_status;
   if (!st || !Array.isArray(statusAceitos) || !statusAceitos.includes(st)) motivos.push('status_bloqueado');
-  else {
-    const em = cliente?.ennychat_status_em ? Date.parse(cliente.ennychat_status_em) : NaN;
-    if (!Number.isFinite(em) || agoraMs - em > statusMaxIdadeH * 3_600_000) motivos.push('status_desatualizado');
-  }
 
   if (aceitos > 0) motivos.push('ja_enviado');
   // Pode ter sido aceito pela Brevo sem registro (queda entre o 201 e o banco): NUNCA reaparece como elegível sozinho.

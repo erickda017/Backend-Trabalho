@@ -117,18 +117,18 @@ test('worker: status excluído com disparo pendente => cancelado, provedor não 
   assert.deepEqual(linhas(db, 'email_envios').map((e) => [e.status, e.motivo]), [['cancelado', 'status_bloqueado'], ['cancelado', 'status_bloqueado']]);
 });
 
-test('worker: status desatualizado fica pendente de verificação; vencida e PDF trocado não saem', async () => {
+test('worker: fatura vencida/atrasada e status antigo SAEM; PDF trocado depois do vínculo não sai', async () => {
   setBrevo(true);
   const db = cenario({ porUsuario: 3 });
   const c = linhas(db, 'clientes');
-  c[0].ennychat_status_em = '2020-01-01T00:00:00Z'; // verificado há muito tempo
-  c[1].vencimento = '01/01/2020'; // vencida
-  c[2].pdf_path = 'outro/arquivo.pdf'; // PDF trocado depois do vínculo validado
+  c[0].ennychat_status_em = '2020-01-01T00:00:00Z'; // status visto há muito tempo: não bloqueia
+  c[1].vencimento = '01/01/2020'; // atrasada: também recebe
+  c[2].pdf_path = 'outro/arquivo.pdf'; // PDF trocado depois do vínculo validado: não sai
   const lote = await novoLote(db, 'u1', c.map((x) => x.id));
   const p = provedor();
   await processarLote(lote.id, { enviar: p.enviar, atrasoMs: 0 });
-  assert.equal(p.chamadas.length, 0);
-  assert.deepEqual(linhas(db, 'email_envios').map((e) => e.motivo), ['status_desatualizado', 'vencida', 'sem_pdf_validado']);
+  assert.equal(p.chamadas.length, 2);
+  assert.deepEqual(linhas(db, 'email_envios').map((e) => [e.status, e.motivo ?? null]), [['aceito', null], ['aceito', null], ['cancelado', 'sem_pdf_validado']]);
 });
 
 test('worker: falha transitória repete (tentativas técnicas > aceitos); definitiva não repete', async () => {

@@ -4,8 +4,6 @@ import { buscarTodos } from '../buscarTodos.js';
 import { avaliarElegibilidade, hojeBrt } from './elegibilidade.js';
 import { MOTIVOS_INCERTOS } from './constantes.js';
 
-export const JANELA_DIAS = Number(process.env.EMAIL_JANELA_DIAS) || 10;
-export const STATUS_MAX_IDADE_H = Number(process.env.EMAIL_STATUS_MAX_IDADE_H) || 24;
 export const LIMITE_DIARIO = Number(process.env.BREVO_LIMITE_DIARIO) || 300;
 
 export async function lerConfigEmail() {
@@ -45,7 +43,6 @@ export async function carregarLinhas(usuarioId, cfg, agora = new Date()) {
     porChave.set(k, a);
   }
 
-  const hoje = hojeBrt(agora);
   return (cli.data || []).map((c) => {
     const a = porChave.get(chaveEnvio(c.ennychat_fatura_id, c.id)) ?? { aceitos: 0, incertos: 0, tentativas: 0, ativo: false, ultimo: null };
     const { elegivel, motivos } = avaliarElegibilidade({
@@ -55,10 +52,6 @@ export async function carregarLinhas(usuarioId, cfg, agora = new Date()) {
       incertos: a.incertos,
       ativo: a.ativo,
       statusAceitos: cfg.statusAceitos,
-      hoje,
-      janelaDias: JANELA_DIAS,
-      statusMaxIdadeH: STATUS_MAX_IDADE_H,
-      agoraMs: agora.getTime(),
     });
     return {
       cliente_id: c.id,

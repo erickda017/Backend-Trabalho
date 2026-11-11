@@ -22,9 +22,8 @@ test('elegibilidade: caso feliz e cada pendência individual', () => {
   assert.deepEqual(motivos({ cliente: { email: null } }), ['email_invalido']);
   assert.deepEqual(motivos({ cliente: { valor: null } }), ['sem_valor']);
   assert.deepEqual(motivos({ cliente: { vencimento: null } }), ['sem_vencimento']);
-  assert.deepEqual(motivos({ cliente: { vencimento: '10/11/2026' } }), ['vencida']); // vence hoje: fora
-  assert.deepEqual(motivos({ cliente: { vencimento: '01/11/2026' } }), ['vencida']);
-  assert.deepEqual(motivos({ cliente: { vencimento: '30/11/2026' } }), ['fora_da_janela']);
+  // cliente atrasado (ou vencendo hoje, ou longe) TAMBÉM recebe: não há janela de vencimento
+  for (const v of ['10/11/2026', '01/11/2026', '01/01/2020', '30/11/2026', '31/12/2030']) assert.deepEqual(motivos({ cliente: { vencimento: v } }), [], v);
   assert.deepEqual(motivos({ resto: { pdfValidado: false } }), ['sem_pdf_validado']);
   assert.deepEqual(motivos({ cliente: { pdf_path: null } }), ['sem_pdf_validado']);
   assert.deepEqual(motivos({ resto: { aceitos: 1 } }), ['ja_enviado']);
@@ -33,12 +32,12 @@ test('elegibilidade: caso feliz e cada pendência individual', () => {
   assert.deepEqual(motivos({ resto: { ativo: true } }), ['envio_em_andamento']);
 });
 
-test('elegibilidade: status aceito, desconhecido, lista vazia, desatualizado e excluído depois', () => {
+test('elegibilidade: status aceito, desconhecido, lista vazia e excluído depois', () => {
   assert.deepEqual(motivos({ cliente: { ennychat_status: 'outro' } }), ['status_bloqueado']);
   assert.deepEqual(motivos({ cliente: { ennychat_status: null } }), ['status_bloqueado']);
   assert.deepEqual(motivos({ resto: { statusAceitos: [] } }), ['status_bloqueado']); // lista vazia
-  assert.deepEqual(motivos({ cliente: { ennychat_status_em: '2026-11-08T10:00:00Z' } }), ['status_desatualizado']); // pendente de verificação
-  assert.deepEqual(motivos({ cliente: { ennychat_status_em: null } }), ['status_desatualizado']);
+  assert.deepEqual(motivos({ cliente: { ennychat_status_em: '2020-01-01T00:00:00Z' } }), []); // sem exigência de status "verificado recentemente"
+  assert.deepEqual(motivos({ cliente: { ennychat_status_em: null } }), []);
   // "Aguardando boleto" -> permitido: passa a elegível quando entra na lista
   assert.equal(avaliarElegibilidade(base({ cliente: { ennychat_status: 'aguardando_boleto' }, resto: { statusAceitos: ['aguardando_boleto'] } })).elegivel, true);
   // status excluído com disparo pendente: o worker reavalia e bloqueia

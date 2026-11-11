@@ -6,10 +6,10 @@ import { supabase, BUCKET } from '../lib/supabase.js';
 import { armazenamento } from '../lib/armazenamento.js';
 import { logLimitado } from '../lib/log.js';
 import { descreverErro } from '../lib/redigir.js';
-import { avaliarElegibilidade, hojeBrt, vencimentoParaIso } from '../lib/email/elegibilidade.js';
+import { avaliarElegibilidade, vencimentoParaIso } from '../lib/email/elegibilidade.js';
 import { renderizarEmail, formatarValor, formatarDataIso, mesReferencia, primeiroNome, assuntoFatura } from '../lib/email/modelo.js';
 import { configuracaoBrevo, enviarTransacional, procurarEnvioRecente } from '../lib/email/brevo.js';
-import { JANELA_DIAS, STATUS_MAX_IDADE_H, lerConfigEmail } from '../lib/email/dados.js';
+import { lerConfigEmail } from '../lib/email/dados.js';
 import { MOTIVOS_INCERTOS } from '../lib/email/constantes.js';
 
 const ATRASO_ENTRE_ENVIOS_MS = Number(process.env.EMAIL_ATRASO_MS) || 250;
@@ -92,12 +92,7 @@ async function processarItem(item, lote, deps) {
     incertos: lote.reenvio ? 0 : anteriores.filter((e) => e.status === 'falhou' && MOTIVOS_INCERTOS.includes(e.motivo)).length,
     ativo: false,
     statusAceitos: conf.statusAceitos,
-    hoje: hojeBrt(),
-    janelaDias: JANELA_DIAS,
-    statusMaxIdadeH: STATUS_MAX_IDADE_H,
-    agoraMs: Date.now(),
   });
-  // status desatualizado = pendente de verificação (a fatura volta a ser elegível depois de abrir Tratar); os demais cancelam.
   if (!ver.elegivel) return atualizar(item.id, { status: 'cancelado', motivo: ver.motivos[0] });
 
   // ---- e-mail: um destinatário, o PDF dessa fatura, HTML do repo com os valores escapados ----

@@ -585,15 +585,44 @@ router.post('/faturas/:idExterno/bloqueio', async (req, res) => {
   }
 });
 
+// Pix JÁ guardado para a fatura (o que o botão "Copiar Pix" entrega): do boleto VINCULADO (OS, nome e vencimento conferidos) ou, nas
+// operadoras sem PDF (Desktop), o Pix digitado no EnnyChat e validado (CRC). Exige status aceito. null + motivo se não houver.
+async function pixDaFatura(usuarioId, idExterno, cliente, aceitos) {
+  if (!cliente) return { motivo: 'sem_cadastro' };
+  if (!avaliarStatus(cliente.ennychat_status, aceitos).permitido) return { motivo: 'status_fora_da_lista' };
+  const anexo = await ultimoAnexo(usuarioId, idExterno);
+  if (anexo?.estado === 'vinculado' && cliente.pdf_path && cliente.pix_code) {
+    return { pix: cliente.pix_code, linha_digitavel: cliente.linha_digitavel ?? null, origem: 'pdf' };
+  }
+  if (await temM33()) {
+    const { data: f } = await supabase.from('ennychat_faturas').select('pix_code').eq('usuario_id', usuarioId).eq('fatura_externa_id', idExterno).maybeSingle();
+    if (f?.pix_code && isValidPixPayload(f.pix_code)) return { pix: f.pix_code, linha_digitavel: null, origem: 'site' };
+  }
+  return { motivo: 'sem_vinculo' };
+}
+
+const hashPix = (pix) => crypto.createHash('sha256').update(pix).digest('hex').slice(0, 8);
+
 // ---------- GET /faturas/:idExterno/estado ----------
+// A extensão pergunta isto ao ABRIR a ficha: se a fatura já existe e já tem Pix pronto (e nada mudou), não reprocessa nada.
 router.get('/faturas/:idExterno/estado', async (req, res) => {
   try {
     const { idExterno } = req.params;
     if (!idExternoValido(idExterno)) return res.status(400).json({ error: 'Fatura inválida.' });
+    res.set('Cache-Control', 'no-store');
     const cliente = await clientePorFatura(req.user.id, idExterno);
     const anexo = cliente ? await ultimoAnexo(req.user.id, idExterno) : null;
+    // Fatura 2 do mesmo cliente (só registrada em ennychat_faturas): já existe, sem cadastro próprio.
+    let irma = false;
+    if (!cliente && (await temM33())) {
+      const { data } = await supabase.from('ennychat_faturas').select('cliente_id').eq('usuario_id', req.user.id).eq('fatura_externa_id', idExterno).maybeSingle();
+      irma = Boolean(data?.cliente_id);
+    }
+    const { status_aceitos: aceitos } = await lerConfig();
+    const p = cliente ? await pixDaFatura(req.user.id, idExterno, cliente, aceitos) : { motivo: 'sem_cadastro' };
     res.json({
-      sincronizado: Boolean(cliente),
+      sincronizado: Boolean(cliente) || irma,
+      irma,
       cliente_id: cliente?.id ?? null,
       pdf: estadoPdf(anexo),
       pix: Boolean(cliente?.pix_code),
@@ -601,6 +630,14 @@ router.get('/faturas/:idExterno/estado', async (req, res) => {
       motivo: anexo?.motivo ?? null,
       verificacoes: anexo?.verificacoes ?? null,
       atualizado_em: anexo?.atualizado_em ?? cliente?.ennychat_status_em ?? null,
+      // Para a extensão decidir se NADA mudou (então só mostra o Pix guardado, sem reprocessar):
+      pix_ok: Boolean(p.pix),
+      pix_origem: p.origem ?? null,
+      pix_hash: p.pix ? hashPix(p.pix) : null, // nunca o Pix em si
+      status: cliente?.ennychat_status ?? null,
+      valor: cliente?.valor ?? null,
+      vencimento: cliente?.vencimento ?? null, // "DD/MM/AAAA"
+      operadora: cliente?.ennychat_operadora ?? null,
     });
   } catch (err) {
     erro500(res, err, 'estado');
@@ -616,19 +653,10 @@ router.get('/faturas/:idExterno/pix', async (req, res) => {
     if (!idExternoValido(idExterno)) return res.status(400).json({ error: 'Fatura inválida.' });
     res.set('Cache-Control', 'no-store');
     const cliente = await clientePorFatura(req.user.id, idExterno);
-    if (!cliente) return res.json({ estado: 'indisponivel', motivo: 'sem_cadastro' });
     const { status_aceitos: aceitos } = await lerConfig();
-    if (!avaliarStatus(cliente.ennychat_status, aceitos).permitido) return res.json({ estado: 'indisponivel', motivo: 'status_fora_da_lista' });
-    const anexo = await ultimoAnexo(req.user.id, idExterno);
-    if (anexo?.estado === 'vinculado' && cliente.pdf_path && cliente.pix_code) {
-      return res.json({ estado: 'ok', pix: cliente.pix_code, linha_digitavel: cliente.linha_digitavel ?? null, origem: 'pdf' });
-    }
-    // Sem boleto vinculado: Pix digitado pelo operador no EnnyChat (Desktop), já validado (CRC) ao sincronizar.
-    if (await temM33()) {
-      const { data: f } = await supabase.from('ennychat_faturas').select('pix_code').eq('usuario_id', req.user.id).eq('fatura_externa_id', idExterno).maybeSingle();
-      if (f?.pix_code && isValidPixPayload(f.pix_code)) return res.json({ estado: 'ok', pix: f.pix_code, linha_digitavel: null, origem: 'site' });
-    }
-    res.json({ estado: 'indisponivel', motivo: 'sem_vinculo' });
+    const p = await pixDaFatura(req.user.id, idExterno, cliente, aceitos);
+    if (p.pix) return res.json({ estado: 'ok', pix: p.pix, linha_digitavel: p.linha_digitavel, origem: p.origem });
+    res.json({ estado: 'indisponivel', motivo: p.motivo });
   } catch (err) {
     erro500(res, err, 'pix');
   }

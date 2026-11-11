@@ -345,3 +345,30 @@ test('banco SEM colunas de migrations antigas (importado_em, tipo_fatura, data_p
     assert.equal(u.json.estado, 'sincronizado');
   } finally { s.fechar(); }
 });
+
+test('/estado ao abrir a ficha: diz se já existe, se há Pix pronto (sem entregar o Pix), e o que está guardado para comparar', async () => {
+  const db = banco();
+  const s = await servidor(db);
+  try {
+    const t = tel();
+    // desconhecida
+    const nada = await s.chamar('GET', `${BASE}/faturas/1600/estado`);
+    assert.deepEqual([nada.json.sincronizado, nada.json.pix_ok, nada.json.irma], [false, false, false]);
+    // Desktop com Pix do site
+    await sync(s.chamar, fatura({ id_externo: '1600', venda_os: '1600', cliente_telefone: t, valor: '89.99', codigo_pix: PIX_A, faturas: [{ id: '1600', posicao: 1, vencimento: '2026-12-09', valor: '89.99', status_pagamento: 'pendente', codigo_pix: PIX_A }] }));
+    const e = (await s.chamar('GET', `${BASE}/faturas/1600/estado`)).json;
+    assert.equal(e.sincronizado, true);
+    assert.equal(e.pix_ok, true);
+    assert.equal(e.pix_origem, 'site');
+    assert.equal(e.pix_hash.length, 8);
+    assert.ok(!JSON.stringify(e).includes(PIX_A), 'o Pix em si não vai no /estado');
+    assert.deepEqual([e.status, e.valor, e.vencimento, e.operadora], ['fatura_encaminhada', 89.99, '09/12/2026', 'desktop']);
+    // Fatura 2 (irmã): já existe, sem Pix próprio
+    await sync(s.chamar, fatura({ id_externo: '1601', venda_os: '1600', cliente_telefone: t, posicao: 2, faturas: [{ id: '1600', posicao: 1, vencimento: '2026-12-09', valor: '89.99', status_pagamento: 'pendente' }, { id: '1601', posicao: 2, vencimento: '2027-01-09', valor: '50.00', status_pagamento: 'pendente' }] }));
+    const i = (await s.chamar('GET', `${BASE}/faturas/1601/estado`)).json;
+    assert.deepEqual([i.sincronizado, i.irma, i.pix_ok], [true, true, false]);
+    // status fora da lista: não há Pix "pronto"
+    db.__dados.clientes[0].ennychat_status = 'contato_estabelecido';
+    assert.equal((await s.chamar('GET', `${BASE}/faturas/1600/estado`)).json.pix_ok, false);
+  } finally { s.fechar(); }
+});

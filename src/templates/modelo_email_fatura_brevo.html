@@ -3,39 +3,38 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sua fatura Claro de {{ params.mes_referencia }}</title>
+  <title>Sua fatura de {{ params.mes_referencia }}</title>
 </head>
-<body style="margin:0; padding:0; background-color:#f7f0f1; font-family:Arial,Helvetica,sans-serif; color:#15263a;">
+<body style="margin:0; padding:0; background-color:#f3f6fa; font-family:Arial,Helvetica,sans-serif; color:#15263a;">
   <div style="display:none; max-height:0; overflow:hidden; opacity:0; mso-hide:all;">
-    O PDF da sua fatura Claro está anexo. Vencimento em {{ params.vencimento }}.
+    O PDF da sua fatura está anexo. Vencimento em {{ params.vencimento }}.
   </div>
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f7f0f1" style="width:100%; background-color:#f7f0f1;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f3f6fa" style="width:100%; background-color:#f3f6fa;">
     <tr>
       <td align="center" style="padding:24px 12px;">
         <!--[if mso]><table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0"><tr><td><![endif]-->
-        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:100%; max-width:560px; background-color:#ffffff; border:1px solid #eadcde; border-radius:14px; border-spacing:0;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#ffffff" style="width:100%; max-width:560px; background-color:#ffffff; border:1px solid #dbe3ee; border-radius:14px; border-spacing:0;">
           <tr>
-            <td bgcolor="#a51c2b" style="background-color:#a51c2b; padding:22px 24px; border-radius:13px 13px 0 0;">
-              <p style="margin:0 0 5px; font-size:12px; line-height:17px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase; color:#ffe6e8;">Central de faturas</p>
+            <td bgcolor="#1f3a5f" style="background-color:#1f3a5f; padding:22px 24px; border-radius:13px 13px 0 0;">
+              <p style="margin:0 0 5px; font-size:12px; line-height:17px; font-weight:700; letter-spacing:1.6px; text-transform:uppercase; color:#dbe7f5;">Central de faturas</p>
               <p style="margin:0; font-size:20px; line-height:27px; font-weight:700; color:#ffffff;">{{ params.empresa }}</p>
-              <p style="margin:5px 0 0; font-size:14px; line-height:20px; color:#ffffff;">Empresa autorizada pela Claro</p>
             </td>
           </tr>
           <tr>
             <td style="padding:27px 24px 25px;">
-              <p style="margin:0 0 7px; font-size:13px; line-height:19px; font-weight:700; color:#8e2531;">{{ params.mes_referencia }}</p>
-              <h1 style="margin:0 0 16px; font-size:29px; line-height:35px; font-weight:700; color:#29212a;">Sua fatura Claro está disponível</h1>
+              <p style="margin:0 0 7px; font-size:13px; line-height:19px; font-weight:700; color:#1f3a5f;">{{ params.mes_referencia }}</p>
+              <h1 style="margin:0 0 16px; font-size:29px; line-height:35px; font-weight:700; color:#29212a;">Sua fatura está disponível</h1>
               <p style="margin:0 0 8px; font-size:16px; line-height:24px;">Olá, {{ params.primeiro_nome }}.</p>
               <p style="margin:0 0 22px; font-size:16px; line-height:24px; color:#51464e;">{{ params.mensagem }}</p>
 
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#fff2f3" style="width:100%; table-layout:fixed; background-color:#fff2f3; border:1px solid #f1d8db; border-radius:10px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#eef3f9" style="width:100%; table-layout:fixed; background-color:#eef3f9; border:1px solid #d5e0ee; border-radius:10px;">
                 <tr>
-                  <td width="52%" valign="top" style="padding:15px 10px 15px 14px; border-right:1px solid #f1d8db;">
-                    <p style="margin:0 0 5px; font-size:13px; line-height:18px; font-weight:700; color:#8e2531;">Vencimento</p>
+                  <td width="52%" valign="top" style="padding:15px 10px 15px 14px; border-right:1px solid #d5e0ee;">
+                    <p style="margin:0 0 5px; font-size:13px; line-height:18px; font-weight:700; color:#1f3a5f;">Vencimento</p>
                     <p style="margin:0; font-size:20px; line-height:25px; font-weight:700; color:#29212a;">{{ params.vencimento }}</p>
                   </td>
                   <td width="48%" valign="top" style="padding:15px 10px 15px 14px;">
-                    <p style="margin:0 0 5px; font-size:13px; line-height:18px; font-weight:700; color:#8e2531;">Valor da fatura</p>
+                    <p style="margin:0 0 5px; font-size:13px; line-height:18px; font-weight:700; color:#1f3a5f;">Valor da fatura</p>
                     <p style="margin:0; font-size:20px; line-height:25px; font-weight:700; color:#29212a;">{{ params.valor }}</p>
                   </td>
                 </tr>
@@ -46,8 +45,7 @@
             </td>
           </tr>
           <tr>
-            <td bgcolor="#fcf7f8" style="padding:16px 24px 18px; border-top:1px solid #eadcde; border-radius:0 0 13px 13px; background-color:#fcf7f8;">
-              <p style="margin:0 0 14px; font-size:14px; line-height:21px; color:#51464e;">Você também pode consultar esta fatura no app oficial <strong>Minha Claro</strong>, disponível na <a href="https://play.google.com/store/apps/details?hl=pt_BR&amp;id=com.nvt.cs" style="color:#8e2531; text-decoration:underline;">Google Play</a> e na <a href="https://apps.apple.com/br/app/minha-claro/id526829675" style="color:#8e2531; text-decoration:underline;">App Store</a>.</p>
+            <td bgcolor="#f6f8fb" style="padding:16px 24px 18px; border-top:1px solid #dbe3ee; border-radius:0 0 13px 13px; background-color:#f6f8fb;">
               <p style="margin:0 0 4px; font-size:14px; line-height:20px; font-weight:700; color:#29212a;">Precisa de ajuda?</p>
               <p style="margin:0; font-size:14px; line-height:21px; color:#51464e;">Para dúvidas sobre este envio, responda a este e-mail.</p>
             </td>

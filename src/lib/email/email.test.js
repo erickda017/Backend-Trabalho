@@ -51,20 +51,19 @@ test('datas: fuso de Brasília, vencimento e dias', () => {
   assert.equal(diasEntre('2026-11-10', '2026-11-15'), 5);
 });
 
-test('modelo: personalização, escape e links oficiais no e-mail', () => {
+test('modelo: personalização, escape e sem marca de terceiros no e-mail', () => {
   const html = renderizarEmail({ empresa: 'Minha <b>Empresa</b> & Cia', primeiro_nome: 'João', mes_referencia: 'Novembro de 2026', vencimento: '15/11/2026', valor: formatarValor(99.99) });
   assert.ok(html.includes('Minha &lt;b&gt;Empresa&lt;/b&gt; &amp; Cia'));
   assert.equal(html.includes('<b>Empresa</b>'), false);
   assert.ok(html.includes('Olá, João.') && html.includes('15/11/2026') && html.includes('Novembro de 2026'));
   assert.ok(/R\$\s?99,99/.test(html));
-  assert.ok(html.includes('Empresa autorizada pela Claro'));
-  assert.ok(html.includes('https://play.google.com/store/apps/details?hl=pt_BR&amp;id=com.nvt.cs'));
-  assert.ok(html.includes('https://apps.apple.com/br/app/minha-claro/id526829675'));
+  assert.ok(!html.includes('Claro'));
+  assert.equal(html.includes('play.google.com') || html.includes('apps.apple.com'), false); // sem links de marca de terceiros
   assert.equal(/\{\{/.test(html), false); // nenhum placeholder sobrando
   assert.equal(escapeHtml('"a"'), '&quot;a&quot;');
   assert.equal(mesReferencia('2026-10-15'), 'Outubro de 2026');
   assert.equal(primeiroNome('MARIA JOSE SANTOS'), 'Maria');
-  assert.equal(assuntoFatura('Outubro de 2026'), 'Sua fatura Claro de Outubro de 2026');
+  assert.equal(assuntoFatura('Outubro de 2026'), 'Sua fatura de Outubro de 2026');
 });
 
 // ---- provedor simulado ----

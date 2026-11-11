@@ -47,4 +47,4 @@ export function renderizarEmail(dados) {
   return modelo().replace(/\{\{\s*params\.(\w+)\s*\}\}/g, (_, chave) => escapeHtml(d[chave] ?? ''));
 }
 
-export const assuntoFatura = (mes) => `Sua fatura Claro${mes ? ` de ${mes}` : ''}`;
+export const assuntoFatura = (mes) => `Sua fatura${mes ? ` de ${mes}` : ''}`;

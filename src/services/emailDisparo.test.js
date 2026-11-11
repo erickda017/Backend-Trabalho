@@ -89,7 +89,7 @@ test('worker: um e-mail por fatura, só o PDF e o destinatário daquela fatura; 
     const id = c.para.split('@')[0];
     assert.equal(c.anexoNome, 'fatura.pdf'); // nome neutro
     assert.equal(Buffer.from(c.anexoBase64, 'base64').toString().includes(`${id}/boleto.pdf`), true); // o PDF desse cliente
-    assert.ok(c.html.includes('Empresa Teste') && c.html.includes('Empresa autorizada pela Claro'));
+    assert.ok(c.html.includes('Empresa Teste') && !c.html.includes('Claro'));
   }
   const envios = linhas(db, 'email_envios');
   assert.ok(envios.every((e) => e.status === 'aceito' && e.message_id && e.aceito_em && e.tentativas === 1));
